@@ -215,7 +215,11 @@ func processStatus(pidFile, binaryPath string) (bool, int64, error) {
 			return false, 0, errors.New("pid file points to a different executable")
 		}
 	}
-	return true, 0, nil
+	startedAt, err := processStartedAt(pid)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, 0, nil
+	}
+	return true, startedAt, err
 }
 
 func findProcessByExecutable(binaryPath string) (bool, int64, error) {
@@ -239,10 +243,26 @@ func findProcessByExecutable(binaryPath string) (bool, int64, error) {
 			continue
 		}
 		if matches {
-			return true, 0, nil
+			startedAt, err := processStartedAt(pid)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return true, startedAt, err
 		}
 	}
 	return false, 0, nil
+}
+
+func processStartedAt(pid int) (int64, error) {
+	info, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+	if err != nil {
+		return 0, err
+	}
+	startedAt := info.ModTime().Unix()
+	if startedAt <= 0 {
+		return 0, errors.New("process start time is invalid")
+	}
+	return startedAt, nil
 }
 
 func processExecutableMatches(pid int, binaryPath string) (bool, error) {

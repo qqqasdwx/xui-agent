@@ -30,12 +30,36 @@ func TestProcessStatusFindsConfiguredExecutableWithoutPIDFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	running, _, err := processStatus("", executable)
+	running, startedAt, err := processStatus("", executable)
 	if err != nil {
 		t.Fatalf("processStatus: %v", err)
 	}
 	if !running {
 		t.Fatal("current executable was not found in /proc")
+	}
+	if startedAt <= 0 || startedAt > time.Now().Unix() {
+		t.Fatalf("process startedAt=%d, want a past Unix timestamp", startedAt)
+	}
+}
+
+func TestProcessStatusReportsStartedAtFromPIDFile(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	pidFile := filepath.Join(t.TempDir(), "xray.pid")
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		t.Fatalf("write pid file: %v", err)
+	}
+	running, startedAt, err := processStatus(pidFile, executable)
+	if err != nil {
+		t.Fatalf("processStatus: %v", err)
+	}
+	if !running {
+		t.Fatal("current process was not reported as running")
+	}
+	if startedAt <= 0 || startedAt > time.Now().Unix() {
+		t.Fatalf("process startedAt=%d, want a past Unix timestamp", startedAt)
 	}
 }
 
