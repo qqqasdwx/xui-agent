@@ -8,6 +8,11 @@ test:
 verify:
 	go test -race ./...
 	go vet ./...
+	sh -n deploy/*.sh deploy/xui-agent-launcher scripts/*.sh
+
+.PHONY: integration-systemd
+integration-systemd:
+	./scripts/test-systemd-integration.sh
 
 .PHONY: build
 build:

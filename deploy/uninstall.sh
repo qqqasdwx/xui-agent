@@ -18,8 +18,8 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-systemctl disable --now xui-agent.service 2>/dev/null || true
-rm -f /etc/systemd/system/xui-agent.service
+systemctl disable --now xui-agent.service xui-agent-xray.path xui-agent-xray.service 2>/dev/null || true
+rm -f /etc/systemd/system/xui-agent.service /etc/systemd/system/xui-agent-xray.path /etc/systemd/system/xui-agent-xray.service
 systemctl daemon-reload
 systemctl reset-failed xui-agent.service 2>/dev/null || true
 rm -f /usr/local/bin/xui-agent /usr/local/sbin/xui-agent-uninstall /usr/local/libexec/xui-agent-launcher

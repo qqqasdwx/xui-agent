@@ -20,6 +20,7 @@ import (
 	"github.com/qqqasdwx/xui-agent/internal/identity"
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
 	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
+	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 	v1 "github.com/qqqasdwx/xui-agent/protocol/v1"
 )
 
@@ -165,6 +166,65 @@ func TestExecuteConfigValidationCommand(t *testing.T) {
 	}
 	if runner.calls != 1 {
 		t.Fatalf("runner calls = %d, want 1", runner.calls)
+	}
+}
+
+type successfulApplyController struct{}
+
+func (successfulApplyController) RestartAndWait(context.Context) error { return nil }
+func (successfulApplyController) StopAndWait(context.Context) error    { return nil }
+
+func TestExecuteConfigApplyCommand(t *testing.T) {
+	raw := json.RawMessage(`{"inbounds":[]}`)
+	digest := sha256.Sum256(raw)
+	now := time.Now()
+	command, err := v1.NewCommand("apply-1", v1.CommandApplyConfig, v1.ApplyConfigCommand{
+		ConfigVersion: 8,
+		ConfigDigest:  hex.EncodeToString(digest[:]),
+		Config:        raw,
+	}, now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewCommand: %v", err)
+	}
+	state := t.TempDir()
+	validator := xrayconfig.NewManager(state, "/opt/xray/xray", &configValidationRunner{})
+	client := &Client{
+		configValidator: validator,
+		configApplier:   xrayruntime.NewManager(state, validator, successfulApplyController{}),
+	}
+	result, restart := client.executeCommand(context.Background(), command)
+	if restart || !result.Success || result.Status != xrayruntime.StatusApplied || result.ConfigVersion != 8 || result.ConfigDigest != hex.EncodeToString(digest[:]) {
+		t.Fatalf("executeCommand restart=%v result=%+v", restart, result)
+	}
+}
+
+func TestConfigApplyCapabilityRequiresManagedMode(t *testing.T) {
+	base := config.Config{
+		ServerURL:      "http://127.0.0.1:2053",
+		StateDirectory: t.TempDir(),
+		AllowInsecure:  true,
+		Xray: config.XrayConfig{
+			Mode:       config.XrayModeObserve,
+			BinaryPath: "/opt/xray/xray",
+			ConfigPath: "/opt/xray/config.json",
+		},
+	}
+	observing, err := NewClient(base, "test")
+	if err != nil {
+		t.Fatalf("NewClient observe: %v", err)
+	}
+	if slices.Contains(observing.capabilities(), v1.CapabilityConfigApply) {
+		t.Fatal("observe mode advertised config apply")
+	}
+	base.StateDirectory = t.TempDir()
+	base.Xray.Mode = config.XrayModeManaged
+	base.Xray.ConfigPath = ""
+	managed, err := NewClient(base, "test")
+	if err != nil {
+		t.Fatalf("NewClient managed: %v", err)
+	}
+	if !slices.Contains(managed.capabilities(), v1.CapabilityConfigApply) {
+		t.Fatal("managed mode did not advertise config apply")
 	}
 }
 

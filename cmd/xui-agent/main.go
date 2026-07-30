@@ -14,6 +14,7 @@ import (
 	"github.com/qqqasdwx/xui-agent/internal/agent"
 	"github.com/qqqasdwx/xui-agent/internal/config"
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
+	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 )
 
 var version = "dev"
@@ -45,12 +46,32 @@ func run(args []string) error {
 		return printStatus(args)
 	case "init-config":
 		return initConfig(args)
+	case "xray-run":
+		return runManagedXray(args)
 	case "version":
 		fmt.Printf("xui-agent %s (commit %s, built %s)\n", version, commit, buildDate)
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func runManagedXray(args []string) error {
+	flags := flag.NewFlagSet("xray-run", flag.ContinueOnError)
+	configPath := flags.String("config", "/etc/xui-agent/config.json", "path to the agent configuration")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	if !cfg.Xray.Managed() {
+		return errors.New("xray-run requires xray.mode=managed")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return xrayruntime.RunManagedProcess(ctx, cfg.StateDirectory, cfg.Xray.BinaryPath)
 }
 
 func runAgent(args []string) error {
@@ -132,6 +153,7 @@ func initConfig(args []string) error {
 	serverCertSHA256 := flags.String("server-cert-sha256", "", "optional server certificate SHA-256 fingerprint")
 	updatePublicKey := flags.String("update-public-key", "", "base64 Ed25519 release verification key")
 	xrayBinary := flags.String("xray-binary", "/usr/local/x-ui/bin/xray-linux-amd64", "Xray binary path")
+	xrayMode := flags.String("xray-mode", config.XrayModeObserve, "Xray mode: observe or managed")
 	xrayConfig := flags.String("xray-config", "/usr/local/x-ui/bin/config.json", "Xray config path")
 	xrayPIDFile := flags.String("xray-pid-file", "", "optional Xray PID file path")
 	force := flags.Bool("force", false, "replace an existing config")
@@ -145,10 +167,15 @@ func initConfig(args []string) error {
 		ServerCertSHA256: *serverCertSHA256,
 		Update:           config.UpdateConfig{PublicKey: *updatePublicKey},
 		Xray: config.XrayConfig{
+			Mode:       *xrayMode,
 			BinaryPath: *xrayBinary,
 			ConfigPath: *xrayConfig,
 			PIDFile:    *xrayPIDFile,
 		},
+	}
+	if cfg.Xray.Managed() {
+		cfg.Xray.ConfigPath = ""
+		cfg.Xray.PIDFile = ""
 	}
 	if err := config.Write(*path, cfg, *force); err != nil {
 		return err

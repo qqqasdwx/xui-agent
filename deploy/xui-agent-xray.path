@@ -1,0 +1,10 @@
+[Unit]
+Description=Start managed Xray when an Agent config is available
+
+[Path]
+PathExists=/var/lib/xui-agent/xray-config/current.json
+PathChanged=/var/lib/xui-agent/xray-config/restart
+Unit=xui-agent-xray.service
+
+[Install]
+WantedBy=multi-user.target

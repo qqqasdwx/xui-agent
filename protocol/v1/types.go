@@ -11,6 +11,7 @@ const (
 	CapabilityObserve        = "observe"
 	CapabilitySelfUpdate     = "self_update"
 	CapabilityConfigValidate = "config_validate"
+	CapabilityConfigApply    = "config_apply"
 	MessageHelloAck          = "hello_ack"
 	MessageHeartbeat         = "heartbeat"
 	MessageHeartbeatAck      = "heartbeat_ack"
@@ -19,6 +20,7 @@ const (
 	MessageProtocolError     = "error"
 	CommandAgentUpdate       = "agent_update"
 	CommandValidateConfig    = "validate_config"
+	CommandApplyConfig       = "apply_config"
 	DefaultHeartbeatPeriod   = 30 * time.Second
 	MaxConfigBytes           = 4 << 20
 	MaxMessageBytes          = 8 << 20
@@ -102,12 +104,13 @@ type SystemInfo struct {
 }
 
 type XrayInfo struct {
-	Present      bool   `json:"present"`
-	Version      string `json:"version"`
-	Running      bool   `json:"running"`
-	StartedAt    int64  `json:"startedAt"`
-	ConfigDigest string `json:"configDigest"`
-	Error        string `json:"error,omitempty"`
+	Present       bool   `json:"present"`
+	Version       string `json:"version"`
+	Running       bool   `json:"running"`
+	StartedAt     int64  `json:"startedAt"`
+	ConfigVersion uint64 `json:"configVersion"`
+	ConfigDigest  string `json:"configDigest"`
+	Error         string `json:"error,omitempty"`
 }
 
 type HeartbeatAck struct {
@@ -147,6 +150,12 @@ type AgentUpdateCommand struct {
 }
 
 type ValidateConfigCommand struct {
+	ConfigVersion uint64          `json:"configVersion"`
+	ConfigDigest  string          `json:"configDigest"`
+	Config        json.RawMessage `json:"config"`
+}
+
+type ApplyConfigCommand struct {
 	ConfigVersion uint64          `json:"configVersion"`
 	ConfigDigest  string          `json:"configDigest"`
 	Config        json.RawMessage `json:"config"`

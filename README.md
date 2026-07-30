@@ -6,6 +6,8 @@
 
 The Agent reports system and Xray status, supports signed updates of its own binary, and can shadow-validate a complete node configuration received from the central control plane. A shadow validation writes only to the Agent state directory and runs the configured Xray binary with `run -test`; it does not replace the running configuration or start, stop, signal, or restart Xray.
 
+Setting `xray.mode` to `managed` enables the separate configuration-apply capability. Managed mode stores immutable configuration versions under the Agent state directory, atomically switches `current.json` and `previous.json`, and runs Xray in a dedicated systemd service. A candidate is confirmed only after the replacement Xray process remains healthy; startup failure restores the previous version. The default `observe` mode never advertises this capability.
+
 Configuration validation commands are limited to 4 MiB, carry a monotonic version and SHA-256 digest, and are idempotent across Agent restarts. Older versions and a reused version with a different digest are rejected.
 
 Existing node panels, Vector agents, and risk processing remain authoritative until their later migration gates are completed.
@@ -34,6 +36,10 @@ The installer preserves an existing configuration and identity. Supplying a new 
 - `/var/lib/xui-agent/versions/`: Agent release binaries
 - `/var/lib/xui-agent/xray-config/candidate.json`: latest shadow candidate, mode `0600`
 - `/var/lib/xui-agent/xray-config/validation.json`: durable validation result, mode `0600`
+- `/var/lib/xui-agent/xray-config/versions/`: immutable managed Xray configurations
+- `/var/lib/xui-agent/xray-config/current.json`: active managed configuration symlink
+- `/var/lib/xui-agent/xray-config/previous.json`: rollback configuration symlink
+- `/var/lib/xui-agent/xray-config/applied.json`: confirmed managed configuration state
 - `/var/lib/xui-agent/current`: atomically selected Agent binary
 - `/var/lib/xui-agent/previous`: rollback target
 - `/usr/local/libexec/xui-agent-launcher`: stable systemd launcher
@@ -77,3 +83,11 @@ Local checks:
 make verify
 make release-snapshot
 ```
+
+On a disposable systemd development VM with no existing xui-agent installation, the managed Xray lifecycle can be tested end to end with:
+
+```sh
+make integration-systemd
+```
+
+The integration target refuses to run when the `xui-agent` account, units, configuration, state directory, or reserved test binaries already exist. It creates and removes those resources during the test.

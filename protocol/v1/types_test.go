@@ -88,3 +88,22 @@ func TestValidateConfigCommandAndResultRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected result=%+v err=%v", result, err)
 	}
 }
+
+func TestApplyConfigCommandRoundTrip(t *testing.T) {
+	now := time.Unix(400, 0)
+	command, err := NewCommand("apply-1", CommandApplyConfig, ApplyConfigCommand{
+		ConfigVersion: 5,
+		ConfigDigest:  "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Config:        json.RawMessage(`{"inbounds":[]}`),
+	}, now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("NewCommand: %v", err)
+	}
+	payload, err := DecodeCommandPayload[ApplyConfigCommand](command)
+	if err != nil {
+		t.Fatalf("DecodeCommandPayload: %v", err)
+	}
+	if payload.ConfigVersion != 5 || string(payload.Config) != `{"inbounds":[]}` {
+		t.Fatalf("unexpected payload: %+v", payload)
+	}
+}

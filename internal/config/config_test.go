@@ -29,6 +29,24 @@ func TestValidateRejectsRelativeStateAndXrayPaths(t *testing.T) {
 	}
 }
 
+func TestValidateManagedXrayRequiresAgentOwnedPaths(t *testing.T) {
+	cfg := Config{
+		ServerURL:      "https://panel.example.com",
+		StateDirectory: "/var/lib/xui-agent",
+		Xray: XrayConfig{
+			Mode:       XrayModeManaged,
+			BinaryPath: "/usr/local/bin/xray",
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("managed config rejected: %v", err)
+	}
+	cfg.Xray.ConfigPath = "/etc/xray/config.json"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("managed config accepted an externally owned config path")
+	}
+}
+
 func TestValidateRejectsCredentialsInServerURL(t *testing.T) {
 	cfg := Config{ServerURL: "https://user:password@panel.example.com", StateDirectory: "/var/lib/xui-agent"}
 	if err := cfg.Validate(); err == nil {

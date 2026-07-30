@@ -13,6 +13,11 @@ import (
 	"strings"
 )
 
+const (
+	XrayModeObserve = "observe"
+	XrayModeManaged = "managed"
+)
+
 type Config struct {
 	ServerURL        string       `json:"serverUrl"`
 	StateDirectory   string       `json:"stateDirectory"`
@@ -23,9 +28,14 @@ type Config struct {
 }
 
 type XrayConfig struct {
+	Mode       string `json:"mode,omitempty"`
 	BinaryPath string `json:"binaryPath"`
 	ConfigPath string `json:"configPath"`
 	PIDFile    string `json:"pidFile"`
+}
+
+func (c XrayConfig) Managed() bool {
+	return c.Mode == XrayModeManaged
 }
 
 type UpdateConfig struct {
@@ -52,6 +62,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.StateDirectory == "" {
 		cfg.StateDirectory = "/var/lib/xui-agent"
+	}
+	if cfg.Xray.Mode == "" {
+		cfg.Xray.Mode = XrayModeObserve
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -129,6 +142,13 @@ func (c Config) Validate() error {
 	if !filepath.IsAbs(c.StateDirectory) {
 		return errors.New("stateDirectory must be an absolute path")
 	}
+	xrayMode := c.Xray.Mode
+	if xrayMode == "" {
+		xrayMode = XrayModeObserve
+	}
+	if xrayMode != XrayModeObserve && xrayMode != XrayModeManaged {
+		return errors.New("xray.mode must be observe or managed")
+	}
 	for name, value := range map[string]string{
 		"xray.binaryPath": c.Xray.BinaryPath,
 		"xray.configPath": c.Xray.ConfigPath,
@@ -136,6 +156,14 @@ func (c Config) Validate() error {
 	} {
 		if value != "" && !filepath.IsAbs(value) {
 			return fmt.Errorf("%s must be an absolute path", name)
+		}
+	}
+	if xrayMode == XrayModeManaged {
+		if c.Xray.BinaryPath == "" {
+			return errors.New("xray.binaryPath is required in managed mode")
+		}
+		if c.Xray.ConfigPath != "" || c.Xray.PIDFile != "" {
+			return errors.New("xray.configPath and xray.pidFile must be empty in managed mode")
 		}
 	}
 	if c.Update.PublicKey != "" {

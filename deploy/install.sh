@@ -8,6 +8,7 @@ SERVER_CERT_SHA256=${XUI_AGENT_SERVER_CERT_SHA256:-}
 UPDATE_PUBLIC_KEY=${XUI_AGENT_UPDATE_PUBLIC_KEY:-}
 ALLOW_INSECURE=false
 XRAY_BINARY=${XUI_AGENT_XRAY_BINARY:-}
+XRAY_MODE=${XUI_AGENT_XRAY_MODE:-observe}
 XRAY_CONFIG=${XUI_AGENT_XRAY_CONFIG:-/usr/local/x-ui/bin/config.json}
 XRAY_PID_FILE=${XUI_AGENT_XRAY_PID_FILE:-}
 CONFIG_PATH=/etc/xui-agent/config.json
@@ -25,6 +26,7 @@ Options:
   --update-public-key KEY        Base64 Ed25519 release verification key
   --allow-insecure               Allow plain HTTP; intended only for tests
   --xray-binary PATH             Existing Xray executable to observe
+  --xray-mode MODE               Xray mode: observe or managed
   --xray-config PATH             Existing Xray config to hash
   --xray-pid-file PATH           Optional existing Xray PID file
   --archive PATH                 Install a local release archive
@@ -43,6 +45,7 @@ while [ "$#" -gt 0 ]; do
         --update-public-key) UPDATE_PUBLIC_KEY=${2:?missing value for --update-public-key}; shift 2 ;;
         --allow-insecure) ALLOW_INSECURE=true; shift ;;
         --xray-binary) XRAY_BINARY=${2:?missing value for --xray-binary}; shift 2 ;;
+        --xray-mode) XRAY_MODE=${2:?missing value for --xray-mode}; shift 2 ;;
         --xray-config) XRAY_CONFIG=${2:?missing value for --xray-config}; shift 2 ;;
         --xray-pid-file) XRAY_PID_FILE=${2:?missing value for --xray-pid-file}; shift 2 ;;
         --archive) ARCHIVE_PATH=${2:?missing value for --archive}; shift 2 ;;
@@ -60,6 +63,14 @@ if [ -z "$SERVER_URL" ]; then
     echo "--server-url is required" >&2
     exit 2
 fi
+case "$XRAY_MODE" in
+    observe) ;;
+    managed)
+        XRAY_CONFIG=
+        XRAY_PID_FILE=
+        ;;
+    *) echo "--xray-mode must be observe or managed" >&2; exit 2 ;;
+esac
 for command in getent groupadd useradd runuser sha256sum systemctl tar; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "$command is required" >&2
@@ -115,7 +126,7 @@ if [ "$actual" != "$expected" ]; then
 fi
 
 entries=$(tar -tzf "$temporary/$archive_name" | LC_ALL=C sort)
-expected_entries=$(printf '%s\n' uninstall.sh xui-agent xui-agent-launcher xui-agent.service | LC_ALL=C sort)
+expected_entries=$(printf '%s\n' uninstall.sh xui-agent xui-agent-launcher xui-agent.service xui-agent-xray.path xui-agent-xray.service | LC_ALL=C sort)
 if [ "$entries" != "$expected_entries" ]; then
     echo "release archive contains unexpected files" >&2
     exit 1
@@ -134,6 +145,8 @@ install -d -m 0700 -o xui-agent -g xui-agent "$STATE_DIRECTORY/versions"
 install -d -m 0755 -o root -g root /usr/local/libexec
 install -m 0755 "$temporary/xui-agent-launcher" /usr/local/libexec/xui-agent-launcher
 install -m 0644 "$temporary/xui-agent.service" /etc/systemd/system/xui-agent.service
+install -m 0644 "$temporary/xui-agent-xray.service" /etc/systemd/system/xui-agent-xray.service
+install -m 0644 "$temporary/xui-agent-xray.path" /etc/systemd/system/xui-agent-xray.path
 install -m 0755 "$temporary/uninstall.sh" /usr/local/sbin/xui-agent-uninstall
 
 if [ ! -L "$STATE_DIRECTORY/current" ]; then
@@ -152,6 +165,7 @@ if [ ! -f "$CONFIG_PATH" ]; then
         --state-directory "$STATE_DIRECTORY" \
         --server-cert-sha256 "$SERVER_CERT_SHA256" \
         --update-public-key "$UPDATE_PUBLIC_KEY" \
+        --xray-mode "$XRAY_MODE" \
         --xray-binary "$XRAY_BINARY" \
         --xray-config "$XRAY_CONFIG" \
         --xray-pid-file "$XRAY_PID_FILE"
@@ -163,7 +177,7 @@ fi
 chown root:xui-agent "$CONFIG_PATH"
 chmod 0640 "$CONFIG_PATH"
 
-if [ -f "$XRAY_CONFIG" ] && command -v setfacl >/dev/null 2>&1; then
+if [ "$XRAY_MODE" = observe ] && [ -f "$XRAY_CONFIG" ] && command -v setfacl >/dev/null 2>&1; then
     setfacl -m u:xui-agent:r "$XRAY_CONFIG"
     printf '%s\n' "$XRAY_CONFIG" > /etc/xui-agent/xray-config-acl.path
     chown root:xui-agent /etc/xui-agent/xray-config-acl.path
@@ -180,6 +194,7 @@ if [ -n "${XUI_AGENT_ENROLLMENT_TOKEN:-}" ]; then
 fi
 
 systemctl daemon-reload
+systemctl enable --now xui-agent-xray.path
 systemctl enable xui-agent.service
 systemctl restart xui-agent.service
 systemctl --quiet is-active xui-agent.service

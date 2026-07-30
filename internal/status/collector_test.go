@@ -1,11 +1,29 @@
 package status
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/qqqasdwx/xui-agent/internal/config"
+	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
+	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 )
+
+type acceptingConfigRunner struct{}
+
+func (acceptingConfigRunner) Validate(context.Context, string, string) error { return nil }
+
+type successfulRuntimeController struct{}
+
+func (successfulRuntimeController) RestartAndWait(context.Context) error { return nil }
+func (successfulRuntimeController) StopAndWait(context.Context) error    { return nil }
 
 func TestProcessStatusFindsConfiguredExecutableWithoutPIDFile(t *testing.T) {
 	executable, err := os.Executable()
@@ -56,5 +74,34 @@ func TestProcessCommandRejectsDifferentExecutable(t *testing.T) {
 	}
 	if match {
 		t.Fatal("current process unexpectedly matched /bin/sh")
+	}
+}
+
+func TestCollectorReportsConfirmedManagedConfigVersion(t *testing.T) {
+	state := t.TempDir()
+	binary := filepath.Join(t.TempDir(), "xray")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\n[ \"$1\" = version ] && echo 'Xray test'\n"), 0o700); err != nil {
+		t.Fatalf("write fake Xray: %v", err)
+	}
+	raw := json.RawMessage(`{"inbounds":[]}`)
+	digest := sha256.Sum256(raw)
+	validator := xrayconfig.NewManager(state, binary, acceptingConfigRunner{})
+	manager := xrayruntime.NewManager(state, validator, successfulRuntimeController{})
+	result, err := manager.Apply(context.Background(), xrayruntime.Request{
+		ConfigVersion: 9,
+		ConfigDigest:  hex.EncodeToString(digest[:]),
+		Config:        raw,
+	})
+	if err != nil || !result.Success() {
+		t.Fatalf("apply managed config result=%+v err=%v", result, err)
+	}
+
+	collector := NewCollector(config.XrayConfig{
+		Mode:       config.XrayModeManaged,
+		BinaryPath: binary,
+	}, state, time.Now())
+	status := collector.collectXray(context.Background())
+	if status.ConfigVersion != 9 || status.ConfigDigest != hex.EncodeToString(digest[:]) {
+		t.Fatalf("managed config status=%+v", status)
 	}
 }

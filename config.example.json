@@ -7,6 +7,7 @@
     "publicKey": ""
   },
   "xray": {
+    "mode": "observe",
     "binaryPath": "/usr/local/x-ui/bin/xray-linux-amd64",
     "configPath": "/usr/local/x-ui/bin/config.json",
     "pidFile": ""

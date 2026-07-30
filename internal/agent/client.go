@@ -27,6 +27,7 @@ import (
 	"github.com/qqqasdwx/xui-agent/internal/status"
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
 	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
+	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 	v1 "github.com/qqqasdwx/xui-agent/protocol/v1"
 )
 
@@ -44,6 +45,7 @@ type Client struct {
 	collector             *status.Collector
 	updater               *updatepkg.Manager
 	configValidator       *xrayconfig.Manager
+	configApplier         *xrayruntime.Manager
 	httpClient            *http.Client
 	wsDialer              *websocket.Dialer
 	startedAt             time.Time
@@ -77,13 +79,23 @@ func NewClient(cfg config.Config, version string) (*Client, error) {
 		return nil, pendingErr
 	}
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	validator := xrayconfig.NewManager(cfg.StateDirectory, cfg.Xray.BinaryPath, nil)
+	var applier *xrayruntime.Manager
+	if cfg.Xray.Managed() {
+		applier = xrayruntime.NewManager(
+			cfg.StateDirectory,
+			validator,
+			xrayruntime.NewProcessController(cfg.StateDirectory, cfg.Xray.BinaryPath),
+		)
+	}
 	return &Client{
 		cfg:             cfg,
 		version:         version,
 		store:           identity.NewStore(cfg.StateDirectory),
-		collector:       status.NewCollector(cfg.Xray, startedAt),
+		collector:       status.NewCollector(cfg.Xray, cfg.StateDirectory, startedAt),
 		updater:         updater,
-		configValidator: xrayconfig.NewManager(cfg.StateDirectory, cfg.Xray.BinaryPath, nil),
+		configValidator: validator,
+		configApplier:   applier,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   15 * time.Second,
@@ -120,6 +132,11 @@ func tlsConfigFor(cfg config.Config) (*tls.Config, error) {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if c.configApplier != nil {
+		if err := c.configApplier.Recover(ctx); err != nil {
+			return fmt.Errorf("recover managed Xray config: %w", err)
+		}
+	}
 	id, err := c.store.Load()
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -377,6 +394,9 @@ func (c *Client) capabilities() []string {
 	if c.configValidator.Enabled() {
 		capabilities = append(capabilities, v1.CapabilityConfigValidate)
 	}
+	if c.configApplier != nil && c.configApplier.Enabled() {
+		capabilities = append(capabilities, v1.CapabilityConfigApply)
+	}
 	return capabilities
 }
 
@@ -396,10 +416,42 @@ func (c *Client) executeCommand(ctx context.Context, command v1.Command) (v1.Com
 		return c.executeAgentUpdate(ctx, command, result)
 	case v1.CommandValidateConfig:
 		return c.executeConfigValidation(ctx, command, result), false
+	case v1.CommandApplyConfig:
+		return c.executeConfigApply(ctx, command, result), false
 	default:
 		result.Error = "unsupported command"
 		return result, false
 	}
+}
+
+func (c *Client) executeConfigApply(ctx context.Context, command v1.Command, result v1.CommandResult) v1.CommandResult {
+	result.Status = xrayruntime.StatusApplyFailed
+	if c.configApplier == nil || !c.configApplier.Enabled() {
+		result.Error = "managed Xray runtime is not configured"
+		return result
+	}
+	payload, err := v1.DecodeCommandPayload[v1.ApplyConfigCommand](command)
+	if err != nil {
+		result.Error = "invalid config apply command"
+		return result
+	}
+	result.ConfigVersion = payload.ConfigVersion
+	result.ConfigDigest = payload.ConfigDigest
+	applied, err := c.configApplier.Apply(ctx, xrayruntime.Request{
+		ConfigVersion: payload.ConfigVersion,
+		ConfigDigest:  payload.ConfigDigest,
+		Config:        payload.Config,
+	})
+	if err != nil {
+		result.Error = safeUpdateError(err)
+		return result
+	}
+	result.Success = applied.Success()
+	result.Status = applied.Status
+	result.ConfigVersion = applied.ConfigVersion
+	result.ConfigDigest = applied.ConfigDigest
+	result.Error = applied.Error
+	return result
 }
 
 func (c *Client) executeAgentUpdate(ctx context.Context, command v1.Command, result v1.CommandResult) (v1.CommandResult, bool) {

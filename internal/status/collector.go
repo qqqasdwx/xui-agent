@@ -19,18 +19,20 @@ import (
 	"time"
 
 	"github.com/qqqasdwx/xui-agent/internal/config"
+	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 	v1 "github.com/qqqasdwx/xui-agent/protocol/v1"
 )
 
 type Collector struct {
-	cfg       config.XrayConfig
-	startedAt time.Time
-	versionMu sync.Mutex
-	version   string
+	cfg            config.XrayConfig
+	stateDirectory string
+	startedAt      time.Time
+	versionMu      sync.Mutex
+	version        string
 }
 
-func NewCollector(cfg config.XrayConfig, startedAt time.Time) *Collector {
-	return &Collector{cfg: cfg, startedAt: startedAt}
+func NewCollector(cfg config.XrayConfig, stateDirectory string, startedAt time.Time) *Collector {
+	return &Collector{cfg: cfg, stateDirectory: stateDirectory, startedAt: startedAt}
 }
 
 func (c *Collector) Heartbeat(ctx context.Context, agentVersion string, now time.Time) v1.Heartbeat {
@@ -43,7 +45,7 @@ func (c *Collector) Heartbeat(ctx context.Context, agentVersion string, now time
 		Arch:            runtime.GOARCH,
 		AgentStartedAt:  c.startedAt.Unix(),
 		ClockUnixMilli:  now.UnixMilli(),
-		System:          collectSystemInfo(c.cfg.ConfigPath),
+		System:          collectSystemInfo(c.configPath()),
 		Xray:            c.collectXray(ctx),
 		Capabilities:    []string{v1.CapabilityObserve},
 	}
@@ -108,16 +110,33 @@ func (c *Collector) collectXray(ctx context.Context) v1.XrayInfo {
 			out.Error = "inspect xray binary: " + err.Error()
 		}
 	}
-	if c.cfg.ConfigPath != "" {
-		digest, err := fileSHA256(c.cfg.ConfigPath)
+	configPath := c.configPath()
+	if configPath != "" {
+		digest, err := fileSHA256(configPath)
 		if err == nil {
 			out.ConfigDigest = digest
 		} else if !errors.Is(err, os.ErrNotExist) {
 			out.Error = appendError(out.Error, "inspect xray config: "+err.Error())
 		}
 	}
-	if c.cfg.PIDFile != "" || c.cfg.BinaryPath != "" {
-		running, startedAt, err := processStatus(c.cfg.PIDFile, c.cfg.BinaryPath)
+	if c.cfg.Managed() {
+		applied, err := xrayruntime.LoadAppliedState(c.stateDirectory)
+		if err == nil {
+			if out.ConfigDigest != applied.ConfigDigest {
+				out.Error = appendError(out.Error, "managed Xray config differs from applied state")
+			} else {
+				out.ConfigVersion = applied.ConfigVersion
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			out.Error = appendError(out.Error, "inspect applied Xray config: "+err.Error())
+		}
+	}
+	pidFile := c.cfg.PIDFile
+	if c.cfg.Managed() {
+		pidFile = xrayruntime.PIDPath(c.stateDirectory)
+	}
+	if pidFile != "" || c.cfg.BinaryPath != "" {
+		running, startedAt, err := processStatus(pidFile, c.cfg.BinaryPath)
 		out.Running = running
 		out.StartedAt = startedAt
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -125,6 +144,13 @@ func (c *Collector) collectXray(ctx context.Context) v1.XrayInfo {
 		}
 	}
 	return out
+}
+
+func (c *Collector) configPath() string {
+	if c.cfg.Managed() {
+		return xrayruntime.CurrentConfigPath(c.stateDirectory)
+	}
+	return c.cfg.ConfigPath
 }
 
 func (c *Collector) xrayVersion(ctx context.Context) string {
