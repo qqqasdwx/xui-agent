@@ -63,6 +63,27 @@ func TestProcessStatusReportsStartedAtFromPIDFile(t *testing.T) {
 	}
 }
 
+func TestParseProcessStartTicksHandlesParenthesesInCommand(t *testing.T) {
+	raw := "123 (xray ) worker) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 123456 0\n"
+	startTicks, err := parseProcessStartTicks(raw)
+	if err != nil {
+		t.Fatalf("parseProcessStartTicks: %v", err)
+	}
+	if startTicks != 123456 {
+		t.Fatalf("start ticks=%d, want 123456", startTicks)
+	}
+}
+
+func TestParseBootTime(t *testing.T) {
+	bootTime, err := parseBootTime("cpu 1 2 3 4\nbtime 1700000000\nprocesses 1\n")
+	if err != nil {
+		t.Fatalf("parseBootTime: %v", err)
+	}
+	if bootTime != 1700000000 {
+		t.Fatalf("boot time=%d, want 1700000000", bootTime)
+	}
+}
+
 func TestProcessStatusRejectsPIDFileForDifferentExecutable(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "xray.pid")
 	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {

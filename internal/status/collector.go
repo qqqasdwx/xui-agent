@@ -254,15 +254,61 @@ func findProcessByExecutable(binaryPath string) (bool, int64, error) {
 }
 
 func processStartedAt(pid int) (int64, error) {
-	info, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
+	processRaw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return 0, err
 	}
-	startedAt := info.ModTime().Unix()
-	if startedAt <= 0 {
-		return 0, errors.New("process start time is invalid")
+	startTicks, err := parseProcessStartTicks(string(processRaw))
+	if err != nil {
+		return 0, err
 	}
-	return startedAt, nil
+	bootRaw, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return 0, err
+	}
+	bootTime, err := parseBootTime(string(bootRaw))
+	if err != nil {
+		return 0, err
+	}
+	const linuxUserHZ uint64 = 100
+	const maxInt64Seconds = uint64(1<<63 - 1)
+	startSeconds := startTicks / linuxUserHZ
+	if startSeconds > maxInt64Seconds-uint64(bootTime) {
+		return 0, errors.New("process start time overflows Unix time")
+	}
+	return bootTime + int64(startSeconds), nil
+}
+
+func parseProcessStartTicks(raw string) (uint64, error) {
+	commEnd := strings.LastIndexByte(raw, ')')
+	if commEnd < 0 {
+		return 0, errors.New("process stat has no command terminator")
+	}
+	fields := strings.Fields(raw[commEnd+1:])
+	const startTimeIndexAfterCommand = 19
+	if len(fields) <= startTimeIndexAfterCommand {
+		return 0, errors.New("process stat is missing start time")
+	}
+	startTicks, err := strconv.ParseUint(fields[startTimeIndexAfterCommand], 10, 64)
+	if err != nil {
+		return 0, errors.New("process stat start time is invalid")
+	}
+	return startTicks, nil
+}
+
+func parseBootTime(raw string) (int64, error) {
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || fields[0] != "btime" {
+			continue
+		}
+		bootTime, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil || bootTime <= 0 {
+			return 0, errors.New("system boot time is invalid")
+		}
+		return bootTime, nil
+	}
+	return 0, errors.New("system boot time is missing")
 }
 
 func processExecutableMatches(pid int, binaryPath string) (bool, error) {
