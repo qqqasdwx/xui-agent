@@ -213,6 +213,7 @@ func initConfig(args []string) error {
 		},
 	}
 	if cfg.Xray.Managed() {
+		cfg.Xray.BinaryPath = config.ManagedXrayBinaryPath(*stateDirectory)
 		cfg.Xray.ConfigPath = ""
 		cfg.Xray.PIDFile = ""
 	}

@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/qqqasdwx/xui-agent/internal/config"
+	"github.com/qqqasdwx/xui-agent/internal/xraybinary"
 	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
+	"github.com/qqqasdwx/xui-agent/internal/xrayupdate"
 	v1 "github.com/qqqasdwx/xui-agent/protocol/v1"
 )
 
@@ -28,6 +30,7 @@ type Collector struct {
 	stateDirectory string
 	startedAt      time.Time
 	versionMu      sync.Mutex
+	versionPath    string
 	version        string
 }
 
@@ -102,10 +105,11 @@ func parseMemInfo(r io.Reader) map[string]uint64 {
 
 func (c *Collector) collectXray(ctx context.Context) v1.XrayInfo {
 	var out v1.XrayInfo
-	if c.cfg.BinaryPath != "" {
-		if info, err := os.Stat(c.cfg.BinaryPath); err == nil && !info.IsDir() {
+	binaryPath := c.binaryPath()
+	if binaryPath != "" {
+		if info, err := os.Stat(binaryPath); err == nil && !info.IsDir() {
 			out.Present = true
-			out.Version = c.xrayVersion(ctx)
+			out.Version = c.xrayVersion(ctx, binaryPath)
 		} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 			out.Error = "inspect xray binary: " + err.Error()
 		}
@@ -120,6 +124,19 @@ func (c *Collector) collectXray(ctx context.Context) v1.XrayInfo {
 		}
 	}
 	if c.cfg.Managed() {
+		binary, err := xrayupdate.LoadAppliedState(c.stateDirectory)
+		if err == nil {
+			out.ManagedVersion = binary.Version
+		} else if !errors.Is(err, os.ErrNotExist) {
+			out.Error = appendError(out.Error, "inspect applied Xray binary: "+err.Error())
+		}
+		binaryFailure, err := xrayupdate.LoadFailureState(c.stateDirectory)
+		if err == nil {
+			out.BinaryRecoveryStatus = binaryFailure.RecoveryStatus
+			out.BinaryRecoveryErrorCode = binaryFailure.ErrorCode
+		} else if !errors.Is(err, os.ErrNotExist) {
+			out.Error = appendError(out.Error, "inspect failed Xray binary update: "+err.Error())
+		}
 		applied, err := xrayruntime.LoadAppliedState(c.stateDirectory)
 		if err == nil {
 			if out.ConfigDigest != applied.ConfigDigest {
@@ -130,13 +147,20 @@ func (c *Collector) collectXray(ctx context.Context) v1.XrayInfo {
 		} else if !errors.Is(err, os.ErrNotExist) {
 			out.Error = appendError(out.Error, "inspect applied Xray config: "+err.Error())
 		}
+		failure, err := xrayruntime.LoadFailureState(c.stateDirectory)
+		if err == nil {
+			out.RecoveryStatus = failure.RecoveryStatus
+			out.RecoveryErrorCode = failure.ErrorCode
+		} else if !errors.Is(err, os.ErrNotExist) {
+			out.Error = appendError(out.Error, "inspect failed Xray config state: "+err.Error())
+		}
 	}
 	pidFile := c.cfg.PIDFile
 	if c.cfg.Managed() {
 		pidFile = xrayruntime.PIDPath(c.stateDirectory)
 	}
-	if pidFile != "" || c.cfg.BinaryPath != "" {
-		running, startedAt, err := processStatus(pidFile, c.cfg.BinaryPath)
+	if pidFile != "" || binaryPath != "" {
+		running, startedAt, err := processStatus(pidFile, binaryPath)
 		out.Running = running
 		out.StartedAt = startedAt
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -146,6 +170,13 @@ func (c *Collector) collectXray(ctx context.Context) v1.XrayInfo {
 	return out
 }
 
+func (c *Collector) binaryPath() string {
+	if c.cfg.Managed() {
+		return xraybinary.ActivePath(c.stateDirectory, c.cfg.BinaryPath)
+	}
+	return c.cfg.BinaryPath
+}
+
 func (c *Collector) configPath() string {
 	if c.cfg.Managed() {
 		return xrayruntime.CurrentConfigPath(c.stateDirectory)
@@ -153,19 +184,24 @@ func (c *Collector) configPath() string {
 	return c.cfg.ConfigPath
 }
 
-func (c *Collector) xrayVersion(ctx context.Context) string {
+func (c *Collector) xrayVersion(ctx context.Context, selectedPath string) string {
+	binaryPath, err := filepath.EvalSymlinks(selectedPath)
+	if err != nil {
+		binaryPath = filepath.Clean(selectedPath)
+	}
 	c.versionMu.Lock()
 	defer c.versionMu.Unlock()
-	if c.version != "" {
+	if c.version != "" && c.versionPath == binaryPath {
 		return c.version
 	}
 	versionCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	raw, err := exec.CommandContext(versionCtx, c.cfg.BinaryPath, "version").Output()
+	raw, err := exec.CommandContext(versionCtx, binaryPath, "version").Output()
 	if err != nil {
 		return ""
 	}
 	line, _, _ := strings.Cut(strings.TrimSpace(string(raw)), "\n")
+	c.versionPath = binaryPath
 	c.version = strings.TrimSpace(line)
 	return c.version
 }

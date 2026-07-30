@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/qqqasdwx/xui-agent/internal/xraybinary"
 )
 
 const (
@@ -80,10 +82,19 @@ func (r ExecRunner) Validate(ctx context.Context, binaryPath, configPath string)
 }
 
 type Manager struct {
-	directory  string
-	binaryPath string
-	runner     Runner
-	mu         sync.Mutex
+	directory          string
+	binaryPath         string
+	binaryPathResolver func() string
+	runner             Runner
+	mu                 sync.Mutex
+}
+
+func NewManagedManager(stateDirectory, bootstrapPath string, runner Runner) *Manager {
+	manager := NewManager(stateDirectory, bootstrapPath, runner)
+	manager.binaryPathResolver = func() string {
+		return xraybinary.ActivePath(stateDirectory, bootstrapPath)
+	}
+	return manager
 }
 
 func NewManager(stateDirectory, binaryPath string, runner Runner) *Manager {
@@ -144,7 +155,11 @@ func (m *Manager) Validate(ctx context.Context, request Request) (Result, error)
 		Status:        StatusValidated,
 		ValidatedAt:   time.Now().Unix(),
 	}
-	if err := m.runner.Validate(ctx, m.binaryPath, candidatePath); err != nil {
+	binaryPath := m.binaryPath
+	if m.binaryPathResolver != nil {
+		binaryPath = m.binaryPathResolver()
+	}
+	if err := m.runner.Validate(ctx, binaryPath, candidatePath); err != nil {
 		result.Status = StatusFailed
 		result.Error = cleanError(err.Error())
 	}

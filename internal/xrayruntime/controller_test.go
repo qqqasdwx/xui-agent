@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -101,6 +102,20 @@ func TestProcessControllerRejectsPIDForDifferentExecutable(t *testing.T) {
 	controller := NewProcessController(state, "/bin/sh")
 	if _, err := controller.runningPID(); err == nil {
 		t.Fatal("pid for a different executable was accepted")
+	}
+}
+
+func TestProcessControllerPreflightRejectsCorruptPID(t *testing.T) {
+	state := t.TempDir()
+	if err := os.MkdirAll(Directory(state), stateDirectoryMode); err != nil {
+		t.Fatalf("create runtime directory: %v", err)
+	}
+	if err := writeAtomic(PIDPath(state), []byte("not-a-pid\n"), configFileMode); err != nil {
+		t.Fatalf("write corrupt pid: %v", err)
+	}
+	controller := NewProcessController(state, "/bin/sh")
+	if err := controller.Preflight(); err == nil || !strings.Contains(err.Error(), "pid file is invalid") {
+		t.Fatalf("Preflight error = %v", err)
 	}
 }
 

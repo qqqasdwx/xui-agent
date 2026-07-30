@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,36 @@ type canceledApplyController struct {
 	directory string
 	restarts  int
 }
+
+type preflightFailureController struct {
+	restarts int
+}
+
+type rollbackFailureController struct {
+	directory string
+	restarts  int
+}
+
+func (*preflightFailureController) Preflight() error {
+	return errors.New("synthetic corrupt pid")
+}
+
+func (c *preflightFailureController) RestartAndWait(context.Context) error {
+	c.restarts++
+	return nil
+}
+
+func (*preflightFailureController) StopAndWait(context.Context) error { return nil }
+
+func (c *rollbackFailureController) RestartAndWait(context.Context) error {
+	c.restarts++
+	if c.restarts == 1 {
+		return nil
+	}
+	return errors.New("synthetic restart failure")
+}
+
+func (*rollbackFailureController) StopAndWait(context.Context) error { return nil }
 
 func (c *canceledApplyController) RestartAndWait(ctx context.Context) error {
 	c.restarts++
@@ -125,6 +156,47 @@ func TestManagerAppliesIdempotentlyAndPreservesPreviousVersion(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsAppliedMetadataThatDiffersFromTarget(t *testing.T) {
+	controller := &recordingController{}
+	manager, state := newRuntimeManager(t, controller)
+	controller.directory = Directory(state)
+	request := runtimeRequest(1, `{"version":1}`)
+	if result, err := manager.Apply(context.Background(), request); err != nil || !result.Success() {
+		t.Fatalf("Apply result=%+v err=%v", result, err)
+	}
+	applied, err := manager.loadApplied()
+	if err != nil {
+		t.Fatalf("loadApplied: %v", err)
+	}
+	applied.ConfigVersion = 2
+	if err := writeJSONAtomic(manager.appliedPath(), applied, configFileMode); err != nil {
+		t.Fatalf("write applied: %v", err)
+	}
+	if _, err := manager.Current(); err == nil {
+		t.Fatal("applied state was accepted with metadata that differs from its immutable target")
+	}
+}
+
+func TestManagerRejectsPendingMetadataThatDiffersFromTarget(t *testing.T) {
+	controller := &recordingController{}
+	manager, state := newRuntimeManager(t, controller)
+	controller.directory = Directory(state)
+	request := runtimeRequest(1, `{"version":1}`)
+	target, err := manager.installVersion(request, false)
+	if err != nil {
+		t.Fatalf("installVersion: %v", err)
+	}
+	pending := pendingState{
+		CommandTarget: target, ConfigVersion: 2, ConfigDigest: request.ConfigDigest, StartedAt: 1,
+	}
+	if err := writeJSONAtomic(manager.pendingPath(), pending, configFileMode); err != nil {
+		t.Fatalf("write pending: %v", err)
+	}
+	if _, err := manager.loadPending(); err == nil {
+		t.Fatal("pending state was accepted with metadata that differs from its immutable target")
+	}
+}
+
 func TestManagerRollsBackRuntimeHealthFailure(t *testing.T) {
 	state := t.TempDir()
 	controller := &recordingController{directory: Directory(state), failOn: `"fail":true`}
@@ -138,7 +210,7 @@ func TestManagerRollsBackRuntimeHealthFailure(t *testing.T) {
 
 	failed := runtimeRequest(2, `{"version":2,"fail":true}`)
 	result, err := manager.Apply(context.Background(), failed)
-	if err != nil || result.Success() || result.Status != StatusApplyFailed || !result.RolledBack {
+	if err != nil || result.Success() || result.Status != StatusApplyFailed || !result.RolledBack || result.ErrorCode != ErrorCodeActivationFailed || result.RecoveryStatus != RecoveryStatusRolledBack {
 		t.Fatalf("failed apply result=%+v err=%v", result, err)
 	}
 	currentTarget, err := os.Readlink(CurrentConfigPath(state))
@@ -237,6 +309,267 @@ func TestManagerRecoversUnconfirmedSwitchByRollingBack(t *testing.T) {
 	current, err := manager.Current()
 	if err != nil || current.ConfigVersion != 1 {
 		t.Fatalf("applied state=%+v err=%v", current, err)
+	}
+}
+
+func TestManagerRecoveryAtDurableBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		switchCurrent  bool
+		persistApplied bool
+		wantVersion    uint64
+		wantRestarts   int
+		wantFailed     bool
+	}{
+		{name: "pending before switch", wantVersion: 1, wantRestarts: 2, wantFailed: true},
+		{name: "current switched before applied", switchCurrent: true, wantVersion: 1, wantRestarts: 2, wantFailed: true},
+		{name: "applied before pending removal", switchCurrent: true, persistApplied: true, wantVersion: 2, wantRestarts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := t.TempDir()
+			controller := &recordingController{directory: Directory(state)}
+			validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+			manager := NewManager(state, validator, controller)
+			first := runtimeRequest(1, `{"version":1}`)
+			if result, err := manager.Apply(context.Background(), first); err != nil || !result.Success() {
+				t.Fatalf("apply first result=%+v err=%v", result, err)
+			}
+			firstTarget, _ := os.Readlink(CurrentConfigPath(state))
+			second := runtimeRequest(2, `{"version":2}`)
+			secondTarget, err := manager.installVersion(second, false)
+			if err != nil {
+				t.Fatalf("install second: %v", err)
+			}
+			pending := pendingState{
+				CommandTarget: secondTarget, PreviousTarget: firstTarget,
+				ConfigVersion: second.ConfigVersion, ConfigDigest: second.ConfigDigest, StartedAt: 1,
+			}
+			if err := writeJSONAtomic(manager.pendingPath(), pending, configFileMode); err != nil {
+				t.Fatalf("write pending: %v", err)
+			}
+			if tc.switchCurrent {
+				if err := atomicSymlink(secondTarget, manager.currentPath()); err != nil {
+					t.Fatalf("switch current: %v", err)
+				}
+			}
+			if tc.persistApplied {
+				if err := writeJSONAtomic(manager.appliedPath(), AppliedState{
+					ConfigVersion: 2, ConfigDigest: second.ConfigDigest, Target: secondTarget, AppliedAt: 2,
+				}, configFileMode); err != nil {
+					t.Fatalf("write applied: %v", err)
+				}
+			}
+
+			if err := manager.Recover(context.Background()); err != nil {
+				t.Fatalf("Recover: %v", err)
+			}
+			current, err := manager.Current()
+			if err != nil || current.ConfigVersion != tc.wantVersion {
+				t.Fatalf("current=%+v err=%v, want v%d", current, err, tc.wantVersion)
+			}
+			if controller.restarts != tc.wantRestarts {
+				t.Fatalf("restarts=%d, want %d", controller.restarts, tc.wantRestarts)
+			}
+			if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pending remains: %v", err)
+			}
+			_, failedErr := os.Stat(manager.failedPath())
+			if tc.wantFailed && failedErr != nil {
+				t.Fatalf("failed state missing: %v", failedErr)
+			}
+			if !tc.wantFailed && !errors.Is(failedErr, os.ErrNotExist) {
+				t.Fatalf("unexpected failed state: %v", failedErr)
+			}
+		})
+	}
+}
+
+func TestRecoverRestoresPreviousStateWhenAppliedCandidateLosesCurrentLink(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+	first := runtimeRequest(1, `{"version":1}`)
+	if result, err := manager.Apply(context.Background(), first); err != nil || !result.Success() {
+		t.Fatalf("apply first result=%+v err=%v", result, err)
+	}
+	previous, err := manager.Current()
+	if err != nil {
+		t.Fatalf("load first state: %v", err)
+	}
+	second := runtimeRequest(2, `{"version":2}`)
+	target, err := manager.installVersion(second, false)
+	if err != nil {
+		t.Fatalf("install second: %v", err)
+	}
+	pending := pendingState{
+		CommandTarget: target, PreviousTarget: previous.Target, PreviousApplied: previous,
+		ConfigVersion: second.ConfigVersion, ConfigDigest: second.ConfigDigest, StartedAt: 1,
+	}
+	if err := writeJSONAtomic(manager.pendingPath(), pending, configFileMode); err != nil {
+		t.Fatalf("write pending: %v", err)
+	}
+	if err := writeJSONAtomic(manager.appliedPath(), AppliedState{
+		ConfigVersion: second.ConfigVersion, ConfigDigest: second.ConfigDigest, Target: target, AppliedAt: 2,
+	}, configFileMode); err != nil {
+		t.Fatalf("write visible candidate applied state: %v", err)
+	}
+	if err := os.Remove(manager.currentPath()); err != nil {
+		t.Fatalf("remove current link: %v", err)
+	}
+
+	if err := manager.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	restored, err := manager.Current()
+	if err != nil || restored.ConfigVersion != previous.ConfigVersion || restored.Target != previous.Target {
+		t.Fatalf("restored=%+v err=%v, want %+v", restored, err, previous)
+	}
+}
+
+func TestRollbackRemovesVisibleInitialAppliedConfigState(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+	request := runtimeRequest(1, `{"version":1}`)
+	target, err := manager.installVersion(request, false)
+	if err != nil {
+		t.Fatalf("install candidate: %v", err)
+	}
+	pending := pendingState{
+		CommandTarget: target, ConfigVersion: request.ConfigVersion,
+		ConfigDigest: request.ConfigDigest, StartedAt: 1,
+	}
+	if err := atomicSymlink(target, manager.currentPath()); err != nil {
+		t.Fatalf("select candidate: %v", err)
+	}
+	if err := writeJSONAtomic(manager.appliedPath(), AppliedState{
+		ConfigVersion: request.ConfigVersion, ConfigDigest: request.ConfigDigest, Target: target, AppliedAt: 1,
+	}, configFileMode); err != nil {
+		t.Fatalf("write visible candidate applied state: %v", err)
+	}
+
+	if err := manager.rollback(context.Background(), pending, "synthetic persistence failure", ErrorCodePersistenceFailed); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if _, err := os.Lstat(manager.currentPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("candidate current remains: %v", err)
+	}
+	if _, err := os.Stat(manager.appliedPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("candidate applied state remains: %v", err)
+	}
+	if controller.stops != 1 {
+		t.Fatalf("stop count = %d, want 1", controller.stops)
+	}
+}
+
+func TestManagerRejectsMissingRollbackTargetBeforeSwitch(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+	first := runtimeRequest(1, `{"version":1}`)
+	if result, err := manager.Apply(context.Background(), first); err != nil || !result.Success() {
+		t.Fatalf("apply first result=%+v err=%v", result, err)
+	}
+	firstTarget, _ := os.Readlink(CurrentConfigPath(state))
+	if err := os.Remove(filepath.Join(Directory(state), firstTarget)); err != nil {
+		t.Fatalf("remove rollback target: %v", err)
+	}
+
+	if _, err := manager.Apply(context.Background(), runtimeRequest(2, `{"version":2}`)); err == nil || !strings.Contains(err.Error(), "verify rollback") {
+		t.Fatalf("missing rollback error = %v", err)
+	}
+	if current, err := os.Readlink(CurrentConfigPath(state)); err != nil || current != firstTarget {
+		t.Fatalf("current=%q err=%v, want unchanged %q", current, err, firstTarget)
+	}
+	if controller.restarts != 1 {
+		t.Fatalf("restarts=%d, want only initial apply", controller.restarts)
+	}
+	if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending state was created: %v", err)
+	}
+}
+
+func TestManagerRunsProcessPreflightBeforeInstallingVersion(t *testing.T) {
+	state := t.TempDir()
+	controller := &preflightFailureController{}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+
+	if _, err := manager.Apply(context.Background(), runtimeRequest(1, `{"version":1}`)); err == nil || !strings.Contains(err.Error(), "preflight managed Xray process") {
+		t.Fatalf("preflight error = %v", err)
+	} else if code, recovery := ErrorDetails(err); code != ErrorCodePreparationFailed || recovery != RecoveryStatusNotRequired {
+		t.Fatalf("preflight details=(%q,%q)", code, recovery)
+	}
+	if controller.restarts != 0 {
+		t.Fatalf("restart called after failed preflight")
+	}
+	versions := filepath.Join(Directory(state), versionsName)
+	entries, err := os.ReadDir(versions)
+	if err == nil && len(entries) != 0 {
+		t.Fatalf("version files installed after failed preflight: %v", entries)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read versions: %v", err)
+	}
+}
+
+func TestManagerPersistsReadableRollbackFailure(t *testing.T) {
+	state := t.TempDir()
+	controller := &rollbackFailureController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+	if result, err := manager.Apply(context.Background(), runtimeRequest(1, `{"version":1}`)); err != nil || !result.Success() {
+		t.Fatalf("apply first result=%+v err=%v", result, err)
+	}
+
+	second := runtimeRequest(2, `{"version":2}`)
+	if _, err := manager.Apply(context.Background(), second); err == nil {
+		t.Fatal("apply with failed rollback succeeded")
+	} else if code, recovery := ErrorDetails(err); code != ErrorCodeRecoveryFailed || recovery != RecoveryStatusFailed {
+		t.Fatalf("rollback failure details=(%q,%q) err=%v", code, recovery, err)
+	}
+	failure, err := LoadFailureState(state)
+	if err != nil {
+		t.Fatalf("LoadFailureState: %v", err)
+	}
+	if failure.ErrorCode != ErrorCodeActivationFailed || failure.RecoveryStatus != RecoveryStatusFailed || !strings.Contains(failure.Error, "rollback failed") {
+		t.Fatalf("failure state=%+v", failure)
+	}
+}
+
+func TestManagerPrunesVersionsWithoutDeletingRollbackTargets(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+	for version := uint64(1); version <= 8; version++ {
+		request := runtimeRequest(version, fmt.Sprintf(`{"version":%d}`, version))
+		if result, err := manager.Apply(context.Background(), request); err != nil || !result.Success() {
+			t.Fatalf("apply v%d result=%+v err=%v", version, result, err)
+		}
+	}
+	current, err := os.Readlink(manager.currentPath())
+	if err != nil {
+		t.Fatalf("read current: %v", err)
+	}
+	previous, err := os.Readlink(manager.previousPath())
+	if err != nil {
+		t.Fatalf("read previous: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(Directory(state), versionsName))
+	if err != nil {
+		t.Fatalf("read versions: %v", err)
+	}
+	if len(entries) != retainedVersions {
+		t.Fatalf("version files=%d, want %d", len(entries), retainedVersions)
+	}
+	for _, target := range []string{current, previous} {
+		if _, err := os.Stat(filepath.Join(Directory(state), target)); err != nil {
+			t.Fatalf("protected target %q was deleted: %v", target, err)
+		}
 	}
 }
 

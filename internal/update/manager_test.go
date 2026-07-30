@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -314,6 +315,41 @@ func TestInstallLocalRejectsExistingPendingUpdate(t *testing.T) {
 	}
 	if _, err := manager.InstallLocal(context.Background(), Request{CommandID: "installer", Version: "v1.2.3"}, testBinary("v1.2.3")); err == nil || !strings.Contains(err.Error(), "pending") {
 		t.Fatalf("pending update error = %v", err)
+	}
+}
+
+func TestInstallLocalPrunesOldVersionsAndPreservesRollback(t *testing.T) {
+	state := setupManagedState(t)
+	manager := &Manager{stateDirectory: state}
+	for version := 1; version <= 6; version++ {
+		name := fmt.Sprintf("v1.0.%d", version)
+		if _, err := manager.InstallLocal(context.Background(), Request{
+			CommandID: fmt.Sprintf("installer-%d", version), Version: name,
+		}, testBinary(name)); err != nil {
+			t.Fatalf("install %s: %v", name, err)
+		}
+		if err := manager.Confirm(name); err != nil {
+			t.Fatalf("confirm %s: %v", name, err)
+		}
+	}
+	if err := manager.pruneVersions(); err != nil {
+		t.Fatalf("pruneVersions: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Join(state, "versions"))
+	if err != nil {
+		t.Fatalf("read versions: %v", err)
+	}
+	if len(entries) != retainedVersions {
+		t.Fatalf("version directories=%d, want %d", len(entries), retainedVersions)
+	}
+	for _, link := range []string{"current", "previous"} {
+		target, err := os.Readlink(filepath.Join(state, link))
+		if err != nil {
+			t.Fatalf("read %s: %v", link, err)
+		}
+		if _, err := os.Stat(filepath.Join(state, target)); err != nil {
+			t.Fatalf("%s target %q was deleted: %v", link, target, err)
+		}
 	}
 }
 

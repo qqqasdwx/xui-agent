@@ -103,6 +103,7 @@ fi
 case "$XRAY_MODE" in
     observe) ;;
     managed)
+		XRAY_BINARY="$STATE_DIRECTORY/xray-runtime/current/xray"
         XRAY_CONFIG=
         XRAY_PID_FILE=
         ;;

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/qqqasdwx/xui-agent/internal/xraybinary"
 )
 
 const (
@@ -37,6 +39,10 @@ type XrayConfig struct {
 
 func (c XrayConfig) Managed() bool {
 	return c.Mode == XrayModeManaged
+}
+
+func ManagedXrayBinaryPath(stateDirectory string) string {
+	return xraybinary.ManagedPath(stateDirectory)
 }
 
 type UpdateConfig struct {

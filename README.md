@@ -8,6 +8,8 @@ The Agent reports system and Xray status, supports signed updates of its own bin
 
 Setting `xray.mode` to `managed` enables the separate configuration-apply capability. Managed mode stores immutable configuration versions under the Agent state directory, atomically switches `current.json` and `previous.json`, and runs Xray in a dedicated systemd service. A candidate is confirmed only after the replacement Xray process remains healthy; startup failure restores the previous version. The default `observe` mode never advertises this capability.
 
+Managed mode can also install and update a complete signed Xray bundle when a release public key is configured. The executable, `geoip.dat`, and `geosite.dat` are pinned and rolled back as one unit. An existing managed installation may keep its configured Xray path as the bootstrap fallback for the first signed bundle; after that bundle is confirmed, the Agent uses only the selected managed runtime. Existing configurations are checked with the candidate before a managed restart; protocol v1 does not claim hot binary replacement. See [Managed Xray Release Contract](docs/managed-xray-release-contract.md) for the capability matrix, activation rules, and rollout order.
+
 Configuration validation commands are limited to 4 MiB, carry a monotonic version and SHA-256 digest, and are idempotent across Agent restarts. Older versions and a reused version with a different digest are rejected.
 
 Existing node panels, Vector agents, and risk processing remain authoritative until their later migration gates are completed.
@@ -41,6 +43,10 @@ The installer preserves an existing configuration and identity. Supplying a new 
 - `/var/lib/xui-agent/xray-config/current.json`: active managed configuration symlink
 - `/var/lib/xui-agent/xray-config/previous.json`: rollback configuration symlink
 - `/var/lib/xui-agent/xray-config/applied.json`: confirmed managed configuration state
+- `/var/lib/xui-agent/xray-runtime/versions/`: immutable Xray executable and geodata bundles
+- `/var/lib/xui-agent/xray-runtime/current`: active managed Xray bundle symlink
+- `/var/lib/xui-agent/xray-runtime/previous`: Xray binary rollback target
+- `/var/lib/xui-agent/xray-runtime/applied.json`: confirmed managed Xray bundle state
 - `/var/lib/xui-agent/current`: atomically selected Agent binary
 - `/var/lib/xui-agent/previous`: rollback target
 - `/usr/local/libexec/xui-agent-launcher`: stable systemd launcher

@@ -5,30 +5,29 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/qqqasdwx/xui-agent/internal/signedrelease"
 )
 
 const (
 	maxManifestBytes      = 1 << 20
-	maxSignatureBytes     = 4 << 10
 	maxArchiveBytes       = 128 << 20
 	maxBinaryBytes        = 64 << 20
 	maxRuntimeAssetBytes  = 1 << 20
+	retainedVersions      = 3
 	pendingFilename       = "update-pending.json"
 	failedFilename        = "update-failed.json"
 	ManifestSchemaVersion = 2
@@ -77,43 +76,24 @@ type Pending struct {
 
 type Manager struct {
 	stateDirectory      string
-	publicKey           ed25519.PublicKey
-	allowInsecure       bool
 	installedAssetsPath string
-	httpClient          *http.Client
+	releases            *signedrelease.Client
 }
 
 func NewManager(stateDirectory, publicKey string, allowInsecure bool, installedAssetsPath string) (*Manager, error) {
-	m := &Manager{
+	releases, err := signedrelease.NewClient(publicKey, allowInsecure)
+	if err != nil {
+		return nil, err
+	}
+	return &Manager{
 		stateDirectory:      stateDirectory,
-		allowInsecure:       allowInsecure,
 		installedAssetsPath: installedAssetsPath,
-		httpClient: &http.Client{
-			Timeout: 2 * time.Minute,
-			CheckRedirect: func(request *http.Request, _ []*http.Request) error {
-				if request.URL.User != nil {
-					return errors.New("update redirect contains credentials")
-				}
-				if request.URL.Scheme == "https" || (allowInsecure && request.URL.Scheme == "http") {
-					return nil
-				}
-				return errors.New("update redirect must use HTTPS")
-			},
-		},
-	}
-	if publicKey == "" {
-		return m, nil
-	}
-	raw, err := base64.StdEncoding.DecodeString(publicKey)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, errors.New("update public key is invalid")
-	}
-	m.publicKey = ed25519.PublicKey(raw)
-	return m, nil
+		releases:            releases,
+	}, nil
 }
 
 func (m *Manager) Enabled() bool {
-	return len(m.publicKey) == ed25519.PublicKeySize
+	return m != nil && m.releases.Enabled()
 }
 
 func (m *Manager) Pending() (*Pending, error) {
@@ -168,17 +148,9 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 			return "", err
 		}
 	}
-	manifestRaw, err := m.download(ctx, request.ManifestURL, maxManifestBytes)
+	manifestRaw, err := m.releases.FetchSigned(ctx, request.ManifestURL, request.SignatureURL, maxManifestBytes)
 	if err != nil {
-		return "", fmt.Errorf("download update manifest: %w", err)
-	}
-	signatureRaw, err := m.download(ctx, request.SignatureURL, maxSignatureBytes)
-	if err != nil {
-		return "", fmt.Errorf("download update signature: %w", err)
-	}
-	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(signatureRaw)))
-	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(m.publicKey, manifestRaw, signature) {
-		return "", errors.New("update manifest signature verification failed")
+		return "", fmt.Errorf("verify update manifest: %w", err)
 	}
 	manifest, err := decodeManifest(manifestRaw)
 	if err != nil {
@@ -195,7 +167,7 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	archive, err := m.download(ctx, artifact.URL, maxArchiveBytes)
+	archive, err := m.releases.Download(ctx, artifact.URL, maxArchiveBytes)
 	if err != nil {
 		return "", fmt.Errorf("download update archive: %w", err)
 	}
@@ -255,6 +227,9 @@ func (m *Manager) install(ctx context.Context, request Request, binary []byte) (
 		return "", errors.New("another agent update is pending")
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", fmt.Errorf("read pending update state: %w", err)
+	}
+	if err := m.pruneVersions(); err != nil {
+		return "", fmt.Errorf("garbage collect agent versions: %w", err)
 	}
 	versionsDirectory := filepath.Join(m.stateDirectory, "versions")
 	binaryDigest := sha256.Sum256(binary)
@@ -345,34 +320,92 @@ func (m *Manager) install(ctx context.Context, request Request, binary []byte) (
 	return request.Version, nil
 }
 
-func (m *Manager) download(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
-	u, err := url.Parse(rawURL)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return nil, errors.New("update URL must be an absolute URL without credentials, query, or fragment")
+func (m *Manager) pruneVersions() error {
+	directory := filepath.Join(m.stateDirectory, "versions")
+	entries, err := os.ReadDir(directory)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
 	}
-	if u.Scheme != "https" && !(m.allowInsecure && u.Scheme == "http") {
-		return nil, errors.New("update URL must use HTTPS")
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	response, err := m.httpClient.Do(request)
-	if err != nil {
-		return nil, err
+	protected := make(map[string]bool)
+	for _, name := range []string{"current", "previous"} {
+		target, err := os.Readlink(filepath.Join(m.stateDirectory, name))
+		if err == nil {
+			versionDirectory, err := agentVersionDirectory(target)
+			if err != nil {
+				return err
+			}
+			protected[versionDirectory] = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
+	type installedVersion struct {
+		name    string
+		modTime time.Time
 	}
-	raw, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, err
+	versions := make([]installedVersion, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "" || entry.Name() == "." || entry.Name() == ".." {
+			continue
+		}
+		children, err := os.ReadDir(filepath.Join(directory, entry.Name()))
+		if err != nil {
+			return err
+		}
+		if len(children) != 1 || children[0].Name() != "xui-agent" || children[0].Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		binaryInfo, err := children[0].Info()
+		if err != nil {
+			return err
+		}
+		if !binaryInfo.Mode().IsRegular() || binaryInfo.Mode().Perm()&0o111 == 0 {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		versions = append(versions, installedVersion{name: entry.Name(), modTime: info.ModTime()})
 	}
-	if int64(len(raw)) > limit {
-		return nil, errors.New("download exceeds the size limit")
+	sort.Slice(versions, func(i, j int) bool {
+		if versions[i].modTime.Equal(versions[j].modTime) {
+			return versions[i].name > versions[j].name
+		}
+		return versions[i].modTime.After(versions[j].modTime)
+	})
+	removed := false
+	for index, version := range versions {
+		if index < retainedVersions || protected[version.name] {
+			continue
+		}
+		versionDirectory := filepath.Join(directory, version.name)
+		if err := os.Remove(filepath.Join(versionDirectory, "xui-agent")); err != nil {
+			return err
+		}
+		if err := os.Remove(versionDirectory); err != nil {
+			return err
+		}
+		removed = true
 	}
-	return raw, nil
+	if removed {
+		return syncDirectory(directory)
+	}
+	return nil
+}
+
+func agentVersionDirectory(target string) (string, error) {
+	if target == "" || filepath.IsAbs(target) || filepath.Clean(target) != target {
+		return "", errors.New("agent version target is invalid")
+	}
+	parts := strings.Split(target, string(filepath.Separator))
+	if len(parts) != 3 || parts[0] != "versions" || parts[1] == "" || parts[2] != "xui-agent" {
+		return "", errors.New("agent version target is outside the versions directory")
+	}
+	return parts[1], nil
 }
 
 func decodeManifest(raw []byte) (Manifest, error) {

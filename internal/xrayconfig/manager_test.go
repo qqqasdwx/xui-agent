@@ -17,6 +17,15 @@ type recordingRunner struct {
 	err   error
 }
 
+type pathRecordingRunner struct {
+	paths []string
+}
+
+func (r *pathRecordingRunner) Validate(_ context.Context, binaryPath, _ string) error {
+	r.paths = append(r.paths, binaryPath)
+	return nil
+}
+
 func (r *recordingRunner) Validate(_ context.Context, binaryPath, configPath string) error {
 	r.calls++
 	if binaryPath != "/opt/xray/xray" {
@@ -62,6 +71,32 @@ func TestManagerValidatesAndPersistsCandidate(t *testing.T) {
 	duplicate, err := manager.Validate(context.Background(), request(2, `{"inbounds":[]}`))
 	if err != nil || !duplicate.Success() || runner.calls != 1 {
 		t.Fatalf("duplicate result=%+v err=%v calls=%d", duplicate, err, runner.calls)
+	}
+}
+
+func TestManagedManagerSwitchesFromBootstrapToSelectedRuntime(t *testing.T) {
+	state := t.TempDir()
+	bootstrap := "/opt/xray/bootstrap"
+	runner := &pathRecordingRunner{}
+	manager := NewManagedManager(state, bootstrap, runner)
+	if _, err := manager.Validate(context.Background(), request(1, `{"inbounds":[]}`)); err != nil {
+		t.Fatalf("validate with bootstrap: %v", err)
+	}
+
+	runtimeDirectory := filepath.Join(state, "xray-runtime")
+	if err := os.MkdirAll(filepath.Join(runtimeDirectory, "versions", "v1"), 0o700); err != nil {
+		t.Fatalf("create runtime directory: %v", err)
+	}
+	if err := os.Symlink("versions/v1", filepath.Join(runtimeDirectory, "current")); err != nil {
+		t.Fatalf("select managed runtime: %v", err)
+	}
+	if _, err := manager.Validate(context.Background(), request(2, `{"inbounds":[]}`)); err != nil {
+		t.Fatalf("validate with managed runtime: %v", err)
+	}
+
+	wantManaged := filepath.Join(runtimeDirectory, "current", "xray")
+	if len(runner.paths) != 2 || runner.paths[0] != bootstrap || runner.paths[1] != wantManaged {
+		t.Fatalf("validation paths = %v, want [%s %s]", runner.paths, bootstrap, wantManaged)
 	}
 }
 

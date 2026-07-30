@@ -12,6 +12,7 @@ const (
 	CapabilitySelfUpdate     = "self_update"
 	CapabilityConfigValidate = "config_validate"
 	CapabilityConfigApply    = "config_apply"
+	CapabilityXrayUpdate     = "xray_update"
 	MessageHelloAck          = "hello_ack"
 	MessageHeartbeat         = "heartbeat"
 	MessageHeartbeatAck      = "heartbeat_ack"
@@ -21,6 +22,7 @@ const (
 	CommandAgentUpdate       = "agent_update"
 	CommandValidateConfig    = "validate_config"
 	CommandApplyConfig       = "apply_config"
+	CommandXrayUpdate        = "xray_update"
 	DefaultHeartbeatPeriod   = 30 * time.Second
 	MaxConfigBytes           = 4 << 20
 	MaxMessageBytes          = 8 << 20
@@ -104,13 +106,18 @@ type SystemInfo struct {
 }
 
 type XrayInfo struct {
-	Present       bool   `json:"present"`
-	Version       string `json:"version"`
-	Running       bool   `json:"running"`
-	StartedAt     int64  `json:"startedAt"`
-	ConfigVersion uint64 `json:"configVersion"`
-	ConfigDigest  string `json:"configDigest"`
-	Error         string `json:"error,omitempty"`
+	Present                 bool   `json:"present"`
+	Version                 string `json:"version"`
+	ManagedVersion          string `json:"managedVersion,omitempty"`
+	Running                 bool   `json:"running"`
+	StartedAt               int64  `json:"startedAt"`
+	ConfigVersion           uint64 `json:"configVersion"`
+	ConfigDigest            string `json:"configDigest"`
+	RecoveryStatus          string `json:"recoveryStatus,omitempty"`
+	RecoveryErrorCode       string `json:"recoveryErrorCode,omitempty"`
+	BinaryRecoveryStatus    string `json:"binaryRecoveryStatus,omitempty"`
+	BinaryRecoveryErrorCode string `json:"binaryRecoveryErrorCode,omitempty"`
+	Error                   string `json:"error,omitempty"`
 }
 
 type HeartbeatAck struct {
@@ -149,6 +156,12 @@ type AgentUpdateCommand struct {
 	SignatureURL string `json:"signatureUrl"`
 }
 
+type XrayUpdateCommand struct {
+	Version      string `json:"version"`
+	ManifestURL  string `json:"manifestUrl"`
+	SignatureURL string `json:"signatureUrl"`
+}
+
 type ValidateConfigCommand struct {
 	ConfigVersion uint64          `json:"configVersion"`
 	ConfigDigest  string          `json:"configDigest"`
@@ -162,13 +175,15 @@ type ApplyConfigCommand struct {
 }
 
 type CommandResult struct {
-	CommandID     string `json:"commandId"`
-	Success       bool   `json:"success"`
-	Status        string `json:"status"`
-	Version       string `json:"version,omitempty"`
-	ConfigVersion uint64 `json:"configVersion,omitempty"`
-	ConfigDigest  string `json:"configDigest,omitempty"`
-	Error         string `json:"error,omitempty"`
+	CommandID      string `json:"commandId"`
+	Success        bool   `json:"success"`
+	Status         string `json:"status"`
+	Version        string `json:"version,omitempty"`
+	ConfigVersion  uint64 `json:"configVersion,omitempty"`
+	ConfigDigest   string `json:"configDigest,omitempty"`
+	Error          string `json:"error,omitempty"`
+	ErrorCode      string `json:"errorCode,omitempty"`
+	RecoveryStatus string `json:"recoveryStatus,omitempty"`
 }
 
 type CommandResultAck struct {

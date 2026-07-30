@@ -28,6 +28,7 @@ import (
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
 	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
 	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
+	"github.com/qqqasdwx/xui-agent/internal/xrayupdate"
 	v1 "github.com/qqqasdwx/xui-agent/protocol/v1"
 )
 
@@ -46,6 +47,7 @@ type Client struct {
 	updater               *updatepkg.Manager
 	configValidator       *xrayconfig.Manager
 	configApplier         *xrayruntime.Manager
+	xrayUpdater           *xrayupdate.Manager
 	httpClient            *http.Client
 	wsDialer              *websocket.Dialer
 	startedAt             time.Time
@@ -81,12 +83,19 @@ func NewClient(cfg config.Config, version string) (*Client, error) {
 	transport := &http.Transport{TLSClientConfig: tlsConfig}
 	validator := xrayconfig.NewManager(cfg.StateDirectory, cfg.Xray.BinaryPath, nil)
 	var applier *xrayruntime.Manager
+	var xrayUpdater *xrayupdate.Manager
 	if cfg.Xray.Managed() {
+		validator = xrayconfig.NewManagedManager(cfg.StateDirectory, cfg.Xray.BinaryPath, nil)
+		controller := xrayruntime.NewProcessController(cfg.StateDirectory, cfg.Xray.BinaryPath)
 		applier = xrayruntime.NewManager(
 			cfg.StateDirectory,
 			validator,
-			xrayruntime.NewProcessController(cfg.StateDirectory, cfg.Xray.BinaryPath),
+			controller,
 		)
+		xrayUpdater, err = xrayupdate.NewManager(cfg.StateDirectory, cfg.Update.PublicKey, cfg.AllowInsecure, controller, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &Client{
 		cfg:             cfg,
@@ -96,6 +105,7 @@ func NewClient(cfg config.Config, version string) (*Client, error) {
 		updater:         updater,
 		configValidator: validator,
 		configApplier:   applier,
+		xrayUpdater:     xrayUpdater,
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   15 * time.Second,
@@ -132,6 +142,11 @@ func tlsConfigFor(cfg config.Config) (*tls.Config, error) {
 }
 
 func (c *Client) Run(ctx context.Context) error {
+	if c.xrayUpdater != nil {
+		if err := c.xrayUpdater.Recover(ctx); err != nil {
+			return fmt.Errorf("recover managed Xray binary: %w", err)
+		}
+	}
 	if c.configApplier != nil {
 		if err := c.configApplier.Recover(ctx); err != nil {
 			return fmt.Errorf("recover managed Xray config: %w", err)
@@ -397,6 +412,9 @@ func (c *Client) capabilities() []string {
 	if c.configApplier != nil && c.configApplier.Enabled() {
 		capabilities = append(capabilities, v1.CapabilityConfigApply)
 	}
+	if c.xrayUpdater != nil && c.xrayUpdater.Enabled() {
+		capabilities = append(capabilities, v1.CapabilityXrayUpdate)
+	}
 	return capabilities
 }
 
@@ -408,8 +426,7 @@ func (c *Client) executeCommand(ctx context.Context, command v1.Command) (v1.Com
 	}
 	now := time.Now().Unix()
 	if command.ExpiresAt <= now || command.IssuedAt > now+60 {
-		result.Error = "command is expired or not yet valid"
-		return result, false
+		return rejectedCommandResult(command, "command is expired or not yet valid", "command_expired"), false
 	}
 	switch command.Type {
 	case v1.CommandAgentUpdate:
@@ -418,21 +435,87 @@ func (c *Client) executeCommand(ctx context.Context, command v1.Command) (v1.Com
 		return c.executeConfigValidation(ctx, command, result), false
 	case v1.CommandApplyConfig:
 		return c.executeConfigApply(ctx, command, result), false
+	case v1.CommandXrayUpdate:
+		return c.executeXrayUpdate(ctx, command, result), false
 	default:
 		result.Error = "unsupported command"
 		return result, false
 	}
 }
 
+func rejectedCommandResult(command v1.Command, message, errorCode string) v1.CommandResult {
+	result := v1.CommandResult{CommandID: command.ID, Status: "failed", Error: message, ErrorCode: errorCode}
+	switch command.Type {
+	case v1.CommandValidateConfig:
+		result.Status = xrayconfig.StatusFailed
+		if payload, err := v1.DecodeCommandPayload[v1.ValidateConfigCommand](command); err == nil {
+			result.ConfigVersion = payload.ConfigVersion
+			result.ConfigDigest = payload.ConfigDigest
+		}
+	case v1.CommandApplyConfig:
+		result.Status = xrayruntime.StatusApplyFailed
+		result.RecoveryStatus = xrayruntime.RecoveryStatusNotRequired
+		if payload, err := v1.DecodeCommandPayload[v1.ApplyConfigCommand](command); err == nil {
+			result.ConfigVersion = payload.ConfigVersion
+			result.ConfigDigest = payload.ConfigDigest
+		}
+	case v1.CommandXrayUpdate:
+		result.Status = xrayupdate.StatusInstallFailed
+		result.RecoveryStatus = xrayupdate.RecoveryStatusNotRequired
+		if payload, err := v1.DecodeCommandPayload[v1.XrayUpdateCommand](command); err == nil {
+			result.Version = payload.Version
+		}
+	}
+	return result
+}
+
+func (c *Client) executeXrayUpdate(ctx context.Context, command v1.Command, result v1.CommandResult) v1.CommandResult {
+	result.Status = xrayupdate.StatusInstallFailed
+	if c.xrayUpdater == nil || !c.xrayUpdater.Enabled() {
+		result.Error = "managed Xray updates are not configured"
+		result.ErrorCode = xrayupdate.ErrorCodePreparationFailed
+		result.RecoveryStatus = xrayupdate.RecoveryStatusNotRequired
+		return result
+	}
+	payload, err := v1.DecodeCommandPayload[v1.XrayUpdateCommand](command)
+	if err != nil {
+		result.Error = "invalid Xray update command"
+		result.ErrorCode = xrayupdate.ErrorCodePreparationFailed
+		result.RecoveryStatus = xrayupdate.RecoveryStatusNotRequired
+		return result
+	}
+	result.Version = payload.Version
+	applied, err := c.xrayUpdater.Apply(ctx, xrayupdate.Request{
+		CommandID: command.ID, Version: payload.Version,
+		ManifestURL: payload.ManifestURL, SignatureURL: payload.SignatureURL,
+	})
+	if err != nil {
+		result.Error = safeUpdateError(err)
+		result.ErrorCode, result.RecoveryStatus = xrayupdate.ErrorDetails(err)
+		return result
+	}
+	result.Success = applied.Success()
+	result.Status = applied.Status
+	result.Version = applied.Version
+	result.Error = applied.Error
+	result.ErrorCode = applied.ErrorCode
+	result.RecoveryStatus = applied.RecoveryStatus
+	return result
+}
+
 func (c *Client) executeConfigApply(ctx context.Context, command v1.Command, result v1.CommandResult) v1.CommandResult {
 	result.Status = xrayruntime.StatusApplyFailed
 	if c.configApplier == nil || !c.configApplier.Enabled() {
 		result.Error = "managed Xray runtime is not configured"
+		result.ErrorCode = xrayruntime.ErrorCodePreparationFailed
+		result.RecoveryStatus = xrayruntime.RecoveryStatusNotRequired
 		return result
 	}
 	payload, err := v1.DecodeCommandPayload[v1.ApplyConfigCommand](command)
 	if err != nil {
 		result.Error = "invalid config apply command"
+		result.ErrorCode = xrayruntime.ErrorCodePreparationFailed
+		result.RecoveryStatus = xrayruntime.RecoveryStatusNotRequired
 		return result
 	}
 	result.ConfigVersion = payload.ConfigVersion
@@ -444,6 +527,7 @@ func (c *Client) executeConfigApply(ctx context.Context, command v1.Command, res
 	})
 	if err != nil {
 		result.Error = safeUpdateError(err)
+		result.ErrorCode, result.RecoveryStatus = xrayruntime.ErrorDetails(err)
 		return result
 	}
 	result.Success = applied.Success()
@@ -451,6 +535,8 @@ func (c *Client) executeConfigApply(ctx context.Context, command v1.Command, res
 	result.ConfigVersion = applied.ConfigVersion
 	result.ConfigDigest = applied.ConfigDigest
 	result.Error = applied.Error
+	result.ErrorCode = applied.ErrorCode
+	result.RecoveryStatus = applied.RecoveryStatus
 	return result
 }
 

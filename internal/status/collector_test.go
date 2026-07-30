@@ -25,6 +25,17 @@ type successfulRuntimeController struct{}
 func (successfulRuntimeController) RestartAndWait(context.Context) error { return nil }
 func (successfulRuntimeController) StopAndWait(context.Context) error    { return nil }
 
+type failingRuntimeController struct{ restarts int }
+
+func (c *failingRuntimeController) RestartAndWait(context.Context) error {
+	c.restarts++
+	if c.restarts == 1 {
+		return fmt.Errorf("synthetic activation failure")
+	}
+	return nil
+}
+func (*failingRuntimeController) StopAndWait(context.Context) error { return nil }
+
 func TestProcessStatusFindsConfiguredExecutableWithoutPIDFile(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
@@ -148,5 +159,50 @@ func TestCollectorReportsConfirmedManagedConfigVersion(t *testing.T) {
 	status := collector.collectXray(context.Background())
 	if status.ConfigVersion != 9 || status.ConfigDigest != hex.EncodeToString(digest[:]) {
 		t.Fatalf("managed config status=%+v", status)
+	}
+
+	failedRaw := json.RawMessage(`{"inbounds":[],"failed":true}`)
+	failedDigest := sha256.Sum256(failedRaw)
+	failing := xrayruntime.NewManager(state, validator, &failingRuntimeController{})
+	failed, err := failing.Apply(context.Background(), xrayruntime.Request{
+		ConfigVersion: 10, ConfigDigest: hex.EncodeToString(failedDigest[:]), Config: failedRaw,
+	})
+	if err != nil || failed.Success() || failed.RecoveryStatus != xrayruntime.RecoveryStatusRolledBack {
+		t.Fatalf("failed managed config result=%+v err=%v", failed, err)
+	}
+	status = collector.collectXray(context.Background())
+	if status.RecoveryStatus != xrayruntime.RecoveryStatusRolledBack || status.RecoveryErrorCode != xrayruntime.ErrorCodeActivationFailed {
+		t.Fatalf("managed recovery status=%+v", status)
+	}
+}
+
+func TestCollectorRefreshesVersionAfterManagedBinarySwitch(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "versions", "v1")
+	second := filepath.Join(root, "versions", "v2")
+	for path, version := range map[string]string{first: "Xray v1", second: "Xray v2"} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatalf("create version directory: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "xray"), []byte("#!/bin/sh\necho '"+version+"'\n"), 0o700); err != nil {
+			t.Fatalf("write fake Xray: %v", err)
+		}
+	}
+	current := filepath.Join(root, "current")
+	if err := os.Symlink(first, current); err != nil {
+		t.Fatalf("link first version: %v", err)
+	}
+	collector := NewCollector(config.XrayConfig{BinaryPath: filepath.Join(current, "xray")}, root, time.Now())
+	if got := collector.xrayVersion(context.Background(), collector.binaryPath()); got != "Xray v1" {
+		t.Fatalf("initial version = %q, want Xray v1", got)
+	}
+	if err := os.Remove(current); err != nil {
+		t.Fatalf("remove current link: %v", err)
+	}
+	if err := os.Symlink(second, current); err != nil {
+		t.Fatalf("link second version: %v", err)
+	}
+	if got := collector.xrayVersion(context.Background(), collector.binaryPath()); got != "Xray v2" {
+		t.Fatalf("version after switch = %q, want Xray v2", got)
 	}
 }

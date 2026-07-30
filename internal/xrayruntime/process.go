@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"syscall"
 	"time"
+
+	"github.com/qqqasdwx/xui-agent/internal/xraybinary"
 )
 
 const processStopTimeout = 10 * time.Second
 
 func RunManagedProcess(ctx context.Context, stateDirectory, binaryPath string) error {
+	binaryPath = xraybinary.ActivePath(stateDirectory, binaryPath)
 	target, err := os.Readlink(CurrentConfigPath(stateDirectory))
 	if err != nil {
 		return fmt.Errorf("read current Xray config: %w", err)
@@ -39,6 +42,7 @@ func RunManagedProcess(ctx context.Context, stateDirectory, binaryPath string) e
 
 	command := exec.Command(binaryPath, "run", "-config", configPath)
 	command.Dir = filepath.Dir(binaryPath)
+	command.Env = append(os.Environ(), "XRAY_LOCATION_ASSET="+command.Dir)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {

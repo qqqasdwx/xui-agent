@@ -11,6 +11,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/qqqasdwx/xui-agent/internal/xraybinary"
 )
 
 const (
@@ -35,6 +37,11 @@ func NewProcessController(stateDirectory, binaryPath string) *ProcessController 
 		stablePeriod:   defaultStablePeriod,
 		pollPeriod:     defaultPollPeriod,
 	}
+}
+
+func (c *ProcessController) Preflight() error {
+	_, err := c.runningPID()
+	return err
 }
 
 func (c *ProcessController) RestartAndWait(ctx context.Context) error {
@@ -135,7 +142,7 @@ func (c *ProcessController) runningPID() (int, error) {
 			return 0, err
 		}
 	}
-	want, err := filepath.EvalSymlinks(c.binaryPath)
+	want, err := filepath.EvalSymlinks(xraybinary.ActivePath(c.stateDirectory, c.binaryPath))
 	if err != nil {
 		return 0, fmt.Errorf("resolve Xray binary: %w", err)
 	}

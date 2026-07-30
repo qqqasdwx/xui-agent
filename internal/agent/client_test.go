@@ -21,6 +21,7 @@ import (
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
 	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
 	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
+	"github.com/qqqasdwx/xui-agent/internal/xrayupdate"
 	v1 "github.com/qqqasdwx/xui-agent/protocol/v1"
 )
 
@@ -198,6 +199,20 @@ func TestExecuteConfigApplyCommand(t *testing.T) {
 	}
 }
 
+func TestExpiredXrayUpdateReturnsTypedFailure(t *testing.T) {
+	now := time.Now()
+	command, err := v1.NewCommand("xray-expired", v1.CommandXrayUpdate, v1.XrayUpdateCommand{
+		Version: "v26.7.28", ManifestURL: "https://example.com/xray-manifest.json", SignatureURL: "https://example.com/xray-manifest.sig",
+	}, now.Add(-2*time.Minute), now.Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("NewCommand: %v", err)
+	}
+	result, restart := (&Client{}).executeCommand(context.Background(), command)
+	if restart || result.Success || result.Status != xrayupdate.StatusInstallFailed || result.Version != "v26.7.28" || result.ErrorCode != "command_expired" || result.RecoveryStatus != xrayupdate.RecoveryStatusNotRequired {
+		t.Fatalf("executeCommand restart=%v result=%+v", restart, result)
+	}
+}
+
 func TestConfigApplyCapabilityRequiresManagedMode(t *testing.T) {
 	base := config.Config{
 		ServerURL:      "http://127.0.0.1:2053",
@@ -225,6 +240,39 @@ func TestConfigApplyCapabilityRequiresManagedMode(t *testing.T) {
 	}
 	if !slices.Contains(managed.capabilities(), v1.CapabilityConfigApply) {
 		t.Fatal("managed mode did not advertise config apply")
+	}
+}
+
+func TestXrayUpdateCapabilityAllowsManagedBootstrapBinary(t *testing.T) {
+	base := config.Config{
+		ServerURL:      "http://127.0.0.1:2053",
+		StateDirectory: t.TempDir(),
+		AllowInsecure:  true,
+		Xray: config.XrayConfig{
+			Mode:       config.XrayModeManaged,
+			BinaryPath: "/opt/xray/bootstrap",
+		},
+		Update: config.UpdateConfig{
+			PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		},
+	}
+	managed, err := NewClient(base, "test")
+	if err != nil {
+		t.Fatalf("NewClient managed bootstrap: %v", err)
+	}
+	if !slices.Contains(managed.capabilities(), v1.CapabilityXrayUpdate) {
+		t.Fatal("managed bootstrap binary did not advertise Xray update")
+	}
+
+	base.StateDirectory = t.TempDir()
+	base.Xray.Mode = config.XrayModeObserve
+	base.Xray.ConfigPath = "/opt/xray/config.json"
+	observing, err := NewClient(base, "test")
+	if err != nil {
+		t.Fatalf("NewClient observe: %v", err)
+	}
+	if slices.Contains(observing.capabilities(), v1.CapabilityXrayUpdate) {
+		t.Fatal("observe mode advertised Xray update")
 	}
 }
 
