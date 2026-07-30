@@ -14,6 +14,10 @@ verify:
 integration-systemd:
 	./scripts/test-systemd-integration.sh
 
+.PHONY: integration-install-upgrade
+integration-install-upgrade:
+	./scripts/test-install-upgrade.sh
+
 .PHONY: build
 build:
 	CGO_ENABLED=0 go build -trimpath -o bin/xui-agent ./cmd/xui-agent

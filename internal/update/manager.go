@@ -213,6 +213,22 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 	if runtimeAssetsDigest != manifest.RuntimeAssetsSHA256 {
 		return "", errors.New("update archive runtime assets do not match the manifest")
 	}
+	return m.InstallLocal(ctx, request, binary)
+}
+
+// InstallLocal prepares an already verified local binary for activation.
+// Root-owned release installers use this entry point after verifying the release
+// archive, while the Manager retains ownership of the durable update state.
+func (m *Manager) InstallLocal(ctx context.Context, request Request, binary []byte) (string, error) {
+	if request.CommandID == "" || len(request.CommandID) > 256 {
+		return "", errors.New("update command id is invalid")
+	}
+	if err := validateVersion(request.Version); err != nil {
+		return "", err
+	}
+	if len(binary) == 0 || len(binary) > maxBinaryBytes {
+		return "", errors.New("candidate binary size is invalid")
+	}
 	return m.install(ctx, request, binary)
 }
 
@@ -235,6 +251,11 @@ func (m *Manager) verifyInstalledRuntimeAssets(want string) error {
 }
 
 func (m *Manager) install(ctx context.Context, request Request, binary []byte) (string, error) {
+	if _, err := m.Pending(); err == nil {
+		return "", errors.New("another agent update is pending")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read pending update state: %w", err)
+	}
 	versionsDirectory := filepath.Join(m.stateDirectory, "versions")
 	binaryDigest := sha256.Sum256(binary)
 	releaseDirectory := request.Version + "-" + hex.EncodeToString(binaryDigest[:])
@@ -264,12 +285,12 @@ func (m *Manager) install(ctx context.Context, request Request, binary []byte) (
 		return "", err
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	output, err := exec.CommandContext(checkCtx, temporaryPath, "version").CombinedOutput()
+	output, err := exec.CommandContext(checkCtx, temporaryPath, "run", "-version").CombinedOutput()
 	cancel()
 	if err != nil {
 		return "", fmt.Errorf("validate candidate binary: %w", err)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(string(output)), "xui-agent "+request.Version+" ") {
+	if string(output) != request.Version+"\n" {
 		return "", errors.New("candidate binary reports a different version")
 	}
 	targetBinary := filepath.Join(targetDirectory, "xui-agent")
@@ -296,6 +317,9 @@ func (m *Manager) install(ctx context.Context, request Request, binary []byte) (
 	targetTarget, err := filepath.Rel(m.stateDirectory, targetBinary)
 	if err != nil {
 		return "", err
+	}
+	if previousTarget == targetTarget {
+		return request.Version, nil
 	}
 	if err := atomicSymlink(previousTarget, filepath.Join(m.stateDirectory, "previous")); err != nil {
 		return "", fmt.Errorf("record previous agent target: %w", err)

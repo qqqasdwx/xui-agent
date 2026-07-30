@@ -27,7 +27,7 @@ curl -fsSL https://github.com/qqqasdwx/xui-agent/releases/latest/download/instal
 
 Plain HTTP is rejected unless `--allow-insecure` is explicitly provided. This option is intended for isolated tests.
 
-The installer preserves an existing configuration and identity. Supplying a new one-time token performs credential rotation without placing the token in a file.
+The installer preserves an existing configuration and identity. Supplying a new one-time token performs credential rotation without placing the token in a file. Re-running a newer release installer upgrades both the Agent binary and its root-owned runtime assets. It records the active binary as `previous`, switches `current` atomically, and waits for the new Agent's first authenticated heartbeat. A startup or health failure restores the previous binary and makes the installer fail explicitly.
 
 ## Runtime Files
 
@@ -48,6 +48,8 @@ The installer preserves an existing configuration and identity. Supplying a new 
 The launcher rolls back a pending release when the new binary exits before completing an authenticated heartbeat. A successful first heartbeat removes the pending marker and confirms the update.
 
 Signed binary updates also compare the release manifest's runtime-assets digest with the root-owned marker written by the installer. If a release changes the launcher, systemd units, or uninstall script, the Agent rejects binary-only activation and reports that the release installer must run first. The unprivileged Agent never writes root-owned runtime assets.
+
+Runtime assets in a release must remain compatible with the immediately previous supported Agent binary because a failed candidate is rolled back under the newly installed launcher and systemd units. A breaking runtime-asset change requires a staged compatibility release before the incompatible assets can ship.
 
 ## Commands
 
@@ -91,6 +93,7 @@ On a disposable systemd development VM with no existing xui-agent installation, 
 
 ```sh
 make integration-systemd
+make integration-install-upgrade
 ```
 
-The integration target refuses to run when the `xui-agent` account, units, configuration, state directory, or reserved test binaries already exist. It creates and removes those resources during the test.
+Both integration targets refuse to run when the `xui-agent` account, units, configuration, state directory, or reserved test binaries already exist. They create and remove those resources during the test. `integration-install-upgrade` downloads the published `v0.2.0` archive, verifies a healthy installer upgrade to local candidates through a test control session, and then verifies automatic rollback after a startup failure.

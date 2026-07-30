@@ -17,6 +17,29 @@ RUNTIME_ASSETS_PATH=/etc/xui-agent/runtime-assets.sha256
 ARCHIVE_PATH=
 CHECKSUMS_PATH=
 runtime_marker_temporary=
+asset_temporary=
+INSTALL_HEALTH_TIMEOUT=${XUI_AGENT_INSTALL_HEALTH_TIMEOUT:-180}
+
+validate_version() {
+    value=$1
+    if [ -z "$value" ] || [ "$value" = . ] || [ "$value" = .. ] || [ "${#value}" -gt 128 ]; then
+        return 1
+    fi
+    case "$value" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+}
+
+install_root_asset() {
+    source=$1
+    destination=$2
+    mode=$3
+    asset_temporary="$destination.tmp-$$"
+    rm -f "$asset_temporary"
+    install -m "$mode" -o root -g root "$source" "$asset_temporary"
+    mv -f "$asset_temporary" "$destination"
+    asset_temporary=
+}
 
 usage() {
     cat <<'EOF'
@@ -57,6 +80,18 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
+if [ "$VERSION" != latest ] && ! validate_version "$VERSION"; then
+    echo "--version is invalid" >&2
+    exit 2
+fi
+case "$INSTALL_HEALTH_TIMEOUT" in
+    ''|*[!0-9]*) echo "XUI_AGENT_INSTALL_HEALTH_TIMEOUT must be a positive integer" >&2; exit 2 ;;
+esac
+if [ "$INSTALL_HEALTH_TIMEOUT" -le 0 ]; then
+    echo "XUI_AGENT_INSTALL_HEALTH_TIMEOUT must be a positive integer" >&2
+    exit 2
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
     echo "install.sh must run as root" >&2
     exit 1
@@ -92,7 +127,7 @@ if [ -z "$XRAY_BINARY" ]; then
 fi
 
 temporary=$(mktemp -d)
-trap 'rm -rf "$temporary"; if [ -n "$runtime_marker_temporary" ]; then rm -f "$runtime_marker_temporary"; fi' EXIT HUP INT TERM
+trap 'rm -rf "$temporary"; if [ -n "$runtime_marker_temporary" ]; then rm -f "$runtime_marker_temporary"; fi; if [ -n "$asset_temporary" ]; then rm -f "$asset_temporary"; fi' EXIT HUP INT TERM
 archive_name="xui-agent-linux-$archive_arch.tar.gz"
 
 if [ -n "$ARCHIVE_PATH" ]; then
@@ -134,6 +169,18 @@ if [ "$entries" != "$expected_entries" ]; then
     exit 1
 fi
 tar -xzf "$temporary/$archive_name" -C "$temporary"
+chmod 0755 "$temporary"
+candidate_version=$("$temporary/xui-agent" run -version)
+if ! validate_version "$candidate_version"; then
+    echo "release binary reports an invalid version" >&2
+    exit 1
+fi
+if [ "$VERSION" != latest ] && [ "$candidate_version" != "$VERSION" ]; then
+    echo "release binary version does not match --version" >&2
+    exit 1
+fi
+candidate_digest=$(sha256sum "$temporary/xui-agent" | awk '{print $1}')
+candidate_target="versions/$candidate_version-$candidate_digest/xui-agent"
 runtime_assets_digest=$(
     cd "$temporary"
     sha256sum \
@@ -156,11 +203,32 @@ install -d -m 0750 -o root -g xui-agent /etc/xui-agent
 install -d -m 0700 -o xui-agent -g xui-agent "$STATE_DIRECTORY"
 install -d -m 0700 -o xui-agent -g xui-agent "$STATE_DIRECTORY/versions"
 install -d -m 0755 -o root -g root /usr/local/libexec
-install -m 0755 "$temporary/xui-agent-launcher" /usr/local/libexec/xui-agent-launcher
-install -m 0644 "$temporary/xui-agent.service" /etc/systemd/system/xui-agent.service
-install -m 0644 "$temporary/xui-agent-xray.service" /etc/systemd/system/xui-agent-xray.service
-install -m 0644 "$temporary/xui-agent-xray.path" /etc/systemd/system/xui-agent-xray.path
-install -m 0755 "$temporary/uninstall.sh" /usr/local/sbin/xui-agent-uninstall
+
+existing_install=false
+if [ -L "$STATE_DIRECTORY/current" ]; then
+    existing_install=true
+    current_resolved=$(readlink -f "$STATE_DIRECTORY/current") || {
+        echo "existing current Agent link cannot be resolved" >&2
+        exit 1
+    }
+    case "$current_resolved" in
+        "$STATE_DIRECTORY"/versions/*/xui-agent) ;;
+        *) echo "existing current Agent is outside the managed versions directory" >&2; exit 1 ;;
+    esac
+    if [ -e "$STATE_DIRECTORY/update-pending.json" ] || [ -L "$STATE_DIRECTORY/update-pending.json" ]; then
+        echo "an Agent update is already pending" >&2
+        exit 1
+    fi
+elif [ -e "$STATE_DIRECTORY/current" ]; then
+    echo "existing current Agent path is not a symbolic link" >&2
+    exit 1
+fi
+
+install_root_asset "$temporary/xui-agent-launcher" /usr/local/libexec/xui-agent-launcher 0755
+install_root_asset "$temporary/xui-agent.service" /etc/systemd/system/xui-agent.service 0644
+install_root_asset "$temporary/xui-agent-xray.service" /etc/systemd/system/xui-agent-xray.service 0644
+install_root_asset "$temporary/xui-agent-xray.path" /etc/systemd/system/xui-agent-xray.path 0644
+install_root_asset "$temporary/uninstall.sh" /usr/local/sbin/xui-agent-uninstall 0755
 runtime_marker_temporary="$RUNTIME_ASSETS_PATH.tmp-$$"
 printf '%s\n' "$runtime_assets_digest" > "$runtime_marker_temporary"
 chown root:xui-agent "$runtime_marker_temporary"
@@ -168,12 +236,11 @@ chmod 0640 "$runtime_marker_temporary"
 mv -f "$runtime_marker_temporary" "$RUNTIME_ASSETS_PATH"
 runtime_marker_temporary=
 
-if [ ! -L "$STATE_DIRECTORY/current" ]; then
-    bootstrap_digest=$(sha256sum "$temporary/xui-agent" | awk '{print substr($1, 1, 16)}')
-    bootstrap_directory="$STATE_DIRECTORY/versions/bootstrap-$bootstrap_digest"
-    install -d -m 0700 -o xui-agent -g xui-agent "$bootstrap_directory"
-    install -m 0755 -o xui-agent -g xui-agent "$temporary/xui-agent" "$bootstrap_directory/xui-agent"
-    runuser -u xui-agent -- ln -s "versions/bootstrap-$bootstrap_digest/xui-agent" "$STATE_DIRECTORY/current"
+if [ "$existing_install" = false ]; then
+    candidate_directory="$STATE_DIRECTORY/versions/$candidate_version-$candidate_digest"
+    runuser -u xui-agent -- install -d -m 0700 "$candidate_directory"
+    runuser -u xui-agent -- install -m 0755 "$temporary/xui-agent" "$candidate_directory/xui-agent"
+    runuser -u xui-agent -- ln -s "$candidate_target" "$STATE_DIRECTORY/current"
 fi
 ln -sfn "$STATE_DIRECTORY/current" /usr/local/bin/xui-agent
 
@@ -215,6 +282,34 @@ fi
 systemctl daemon-reload
 systemctl enable --now xui-agent-xray.path
 systemctl enable xui-agent.service
-systemctl restart xui-agent.service
+if [ "$existing_install" = true ]; then
+    install_command_id="installer-$candidate_version-$(date +%s)-$$"
+    runuser -u xui-agent -- "$temporary/xui-agent" prepare-update \
+        --state-directory "$STATE_DIRECTORY" \
+        --command-id "$install_command_id"
+fi
+if ! systemctl restart xui-agent.service; then
+    echo "xui-agent restart did not complete immediately; waiting for rollback state" >&2
+fi
+
+if [ "$existing_install" = true ]; then
+    waited=0
+    while [ -f "$STATE_DIRECTORY/update-pending.json" ] && [ "$waited" -lt "$INSTALL_HEALTH_TIMEOUT" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ -f "$STATE_DIRECTORY/update-pending.json" ]; then
+        echo "updated Agent did not confirm an authenticated heartbeat before the installer timeout" >&2
+        exit 1
+    fi
+    active_target=$(readlink "$STATE_DIRECTORY/current") || {
+        echo "current Agent link disappeared during update" >&2
+        exit 1
+    }
+    if [ "$active_target" != "$candidate_target" ]; then
+        echo "updated Agent failed health validation and was rolled back" >&2
+        exit 1
+    fi
+fi
 systemctl --quiet is-active xui-agent.service
 echo "xui-agent installed and running"

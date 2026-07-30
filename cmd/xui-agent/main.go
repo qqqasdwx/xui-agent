@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/qqqasdwx/xui-agent/internal/agent"
@@ -51,9 +52,47 @@ func run(args []string) error {
 	case "version":
 		fmt.Printf("xui-agent %s (commit %s, built %s)\n", version, commit, buildDate)
 		return nil
+	case "prepare-update":
+		return prepareUpdate(args)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
+}
+
+func prepareUpdate(args []string) error {
+	flags := flag.NewFlagSet("prepare-update", flag.ContinueOnError)
+	stateDirectory := flags.String("state-directory", "/var/lib/xui-agent", "agent state directory")
+	commandID := flags.String("command-id", "", "durable update command identifier")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return errors.New("prepare-update does not accept positional arguments")
+	}
+	if !filepath.IsAbs(*stateDirectory) {
+		return errors.New("state-directory must be an absolute path")
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate candidate binary: %w", err)
+	}
+	binary, err := os.ReadFile(executable)
+	if err != nil {
+		return fmt.Errorf("read candidate binary: %w", err)
+	}
+	manager, err := updatepkg.NewManager(*stateDirectory, "", false, "")
+	if err != nil {
+		return err
+	}
+	prepared, err := manager.InstallLocal(context.Background(), updatepkg.Request{
+		CommandID: *commandID,
+		Version:   version,
+	}, binary)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("prepared xui-agent %s\n", prepared)
+	return nil
 }
 
 func runManagedXray(args []string) error {

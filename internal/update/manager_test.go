@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -49,7 +50,7 @@ func testArchive(t *testing.T, version string) []byte {
 }
 
 func testBinary(version string) []byte {
-	return []byte("#!/bin/sh\necho 'xui-agent " + version + " (test)'\n")
+	return []byte("#!/bin/sh\nif [ \"${1:-}\" = run ] && [ \"${2:-}\" = -version ]; then\n  echo '" + version + "'\n  exit 0\nfi\nexit 2\n")
 }
 
 func releaseTarget(version string, binary []byte) string {
@@ -170,7 +171,7 @@ func TestManagerPreservesRollbackTargetWhenVersionContentChanges(t *testing.T) {
 		t.Fatalf("read first target: %v", err)
 	}
 
-	second := []byte("#!/bin/sh\necho 'xui-agent v1.2.3 (rebuilt)'\n")
+	second := []byte("#!/bin/sh\nif [ \"${1:-}\" = run ] && [ \"${2:-}\" = -version ]; then echo 'v1.2.3'; exit 0; fi\nexit 2\n# rebuilt\n")
 	if _, err := manager.install(context.Background(), Request{CommandID: "second", Version: "v1.2.3"}, second); err != nil {
 		t.Fatalf("install rebuilt version: %v", err)
 	}
@@ -249,7 +250,7 @@ func TestManagerRequiresMatchingInstalledRuntimeAssets(t *testing.T) {
 }
 
 func TestValidateVersionRejectsPathAliases(t *testing.T) {
-	for _, version := range []string{"", ".", "..", "v1/next", `v1\next`} {
+	for _, version := range []string{"", ".", "..", "v1/next", `v1\next`, "v1\nnext", `v1"next`, "v1 next"} {
 		if err := validateVersion(version); err == nil {
 			t.Fatalf("validateVersion(%q) succeeded", version)
 		}
@@ -258,6 +259,61 @@ func TestValidateVersionRejectsPathAliases(t *testing.T) {
 		if err := validateVersion(version); err != nil {
 			t.Fatalf("validateVersion(%q): %v", version, err)
 		}
+	}
+}
+
+func TestInstallLocalRequiresExactCandidateVersion(t *testing.T) {
+	state := setupManagedState(t)
+	manager := &Manager{stateDirectory: state}
+	binary := []byte("#!/bin/sh\nif [ \"${1:-}\" = run ] && [ \"${2:-}\" = -version ]; then\n  printf 'v1.2.3\\nextra\\n'\n  exit 0\nfi\nexit 2\n")
+	if _, err := manager.InstallLocal(context.Background(), Request{CommandID: "installer-1", Version: "v1.2.3"}, binary); err == nil || !strings.Contains(err.Error(), "different version") {
+		t.Fatalf("candidate version error = %v", err)
+	}
+	current, err := os.Readlink(filepath.Join(state, "current"))
+	if err != nil || current != "versions/bootstrap/xui-agent" {
+		t.Fatalf("current changed after rejected candidate: target=%q err=%v", current, err)
+	}
+}
+
+func TestInstallLocalIsIdempotentForActiveBinary(t *testing.T) {
+	state := setupManagedState(t)
+	manager := &Manager{stateDirectory: state}
+	binary := testBinary("v1.2.3")
+	request := Request{CommandID: "installer-1", Version: "v1.2.3"}
+	if _, err := manager.InstallLocal(context.Background(), request, binary); err != nil {
+		t.Fatalf("first InstallLocal: %v", err)
+	}
+	if err := manager.Confirm(request.Version); err != nil {
+		t.Fatalf("confirm first install: %v", err)
+	}
+	previousBefore, err := os.Readlink(filepath.Join(state, "previous"))
+	if err != nil {
+		t.Fatalf("read previous before reinstall: %v", err)
+	}
+	request.CommandID = "installer-2"
+	if _, err := manager.InstallLocal(context.Background(), request, binary); err != nil {
+		t.Fatalf("idempotent InstallLocal: %v", err)
+	}
+	if _, err := manager.Pending(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("idempotent install created pending state: %v", err)
+	}
+	previousAfter, err := os.Readlink(filepath.Join(state, "previous"))
+	if err != nil || previousAfter != previousBefore {
+		t.Fatalf("previous changed from %q to %q: %v", previousBefore, previousAfter, err)
+	}
+}
+
+func TestInstallLocalRejectsExistingPendingUpdate(t *testing.T) {
+	state := setupManagedState(t)
+	manager := &Manager{stateDirectory: state}
+	if err := writeJSONAtomic(filepath.Join(state, pendingFilename), Pending{
+		CommandID: "existing", PreviousTarget: "versions/bootstrap/xui-agent",
+		TargetTarget: "versions/next/xui-agent", TargetVersion: "v2",
+	}, 0o600); err != nil {
+		t.Fatalf("write pending: %v", err)
+	}
+	if _, err := manager.InstallLocal(context.Background(), Request{CommandID: "installer", Version: "v1.2.3"}, testBinary("v1.2.3")); err == nil || !strings.Contains(err.Error(), "pending") {
+		t.Fatalf("pending update error = %v", err)
 	}
 }
 
