@@ -32,6 +32,7 @@ The installer preserves an existing configuration and identity. Supplying a new 
 ## Runtime Files
 
 - `/etc/xui-agent/config.json`: non-secret runtime configuration, mode `0640`
+- `/etc/xui-agent/runtime-assets.sha256`: root-owned digest of installed service and launcher assets, mode `0640`
 - `/var/lib/xui-agent/identity.json`: node credential, mode `0600`
 - `/var/lib/xui-agent/versions/`: Agent release binaries
 - `/var/lib/xui-agent/xray-config/candidate.json`: latest shadow candidate, mode `0600`
@@ -45,6 +46,8 @@ The installer preserves an existing configuration and identity. Supplying a new 
 - `/usr/local/libexec/xui-agent-launcher`: stable systemd launcher
 
 The launcher rolls back a pending release when the new binary exits before completing an authenticated heartbeat. A successful first heartbeat removes the pending marker and confirms the update.
+
+Signed binary updates also compare the release manifest's runtime-assets digest with the root-owned marker written by the installer. If a release changes the launcher, systemd units, or uninstall script, the Agent rejects binary-only activation and reports that the release installer must run first. The unprivileged Agent never writes root-owned runtime assets.
 
 ## Commands
 
@@ -73,7 +76,7 @@ Revoke the node credential in the center before permanent removal.
 
 ## Releases
 
-Release tags build deterministic Linux archives for `amd64`, `arm64`, and `armv7`. The workflow requires the GitHub Actions secret `XUI_AGENT_RELEASE_PRIVATE_KEY`, containing a base64 Ed25519 seed or private key. The workflow verifies that its corresponding public key matches [`deploy/release-public-key.txt`](deploy/release-public-key.txt) before publishing and refuses to overwrite existing release assets.
+Release tags build deterministic Linux archives for `amd64`, `arm64`, and `armv7`. Each signed manifest binds the binary archive and the identical runtime-assets digest across all architectures. The workflow requires the GitHub Actions secret `XUI_AGENT_RELEASE_PRIVATE_KEY`, containing a base64 Ed25519 seed or private key. The workflow verifies that its corresponding public key matches [`deploy/release-public-key.txt`](deploy/release-public-key.txt) before publishing and refuses to overwrite existing release assets.
 
 Configure the value from `deploy/release-public-key.txt` on the central 3x-ui process as `XUI_AGENT_RELEASE_PUBLIC_KEY`; enrollment commands then pin that key in the Agent configuration.
 

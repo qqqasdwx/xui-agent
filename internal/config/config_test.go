@@ -74,6 +74,9 @@ func TestWriteIsAtomicAndDoesNotOverwriteByDefault(t *testing.T) {
 	if loaded.ServerURL != cfg.ServerURL {
 		t.Fatalf("server URL = %q, want %q", loaded.ServerURL, cfg.ServerURL)
 	}
+	if loaded.Update.RuntimeAssetsPath != DefaultRuntimeAssetsPath {
+		t.Fatalf("runtime assets path = %q, want %q", loaded.Update.RuntimeAssetsPath, DefaultRuntimeAssetsPath)
+	}
 	if err := Write(path, cfg, false); err == nil {
 		t.Fatal("Write overwrote an existing config without permission")
 	}

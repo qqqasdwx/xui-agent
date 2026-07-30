@@ -13,8 +13,10 @@ XRAY_CONFIG=${XUI_AGENT_XRAY_CONFIG:-/usr/local/x-ui/bin/config.json}
 XRAY_PID_FILE=${XUI_AGENT_XRAY_PID_FILE:-}
 CONFIG_PATH=/etc/xui-agent/config.json
 STATE_DIRECTORY=/var/lib/xui-agent
+RUNTIME_ASSETS_PATH=/etc/xui-agent/runtime-assets.sha256
 ARCHIVE_PATH=
 CHECKSUMS_PATH=
+runtime_marker_temporary=
 
 usage() {
     cat <<'EOF'
@@ -90,7 +92,7 @@ if [ -z "$XRAY_BINARY" ]; then
 fi
 
 temporary=$(mktemp -d)
-trap 'rm -rf "$temporary"' EXIT HUP INT TERM
+trap 'rm -rf "$temporary"; if [ -n "$runtime_marker_temporary" ]; then rm -f "$runtime_marker_temporary"; fi' EXIT HUP INT TERM
 archive_name="xui-agent-linux-$archive_arch.tar.gz"
 
 if [ -n "$ARCHIVE_PATH" ]; then
@@ -132,6 +134,17 @@ if [ "$entries" != "$expected_entries" ]; then
     exit 1
 fi
 tar -xzf "$temporary/$archive_name" -C "$temporary"
+runtime_assets_digest=$(
+    cd "$temporary"
+    sha256sum \
+        uninstall.sh \
+        xui-agent-launcher \
+        xui-agent-xray.path \
+        xui-agent-xray.service \
+        xui-agent.service |
+        sha256sum |
+        awk '{print $1}'
+)
 
 if ! getent group xui-agent >/dev/null 2>&1; then
     groupadd --system xui-agent
@@ -148,6 +161,12 @@ install -m 0644 "$temporary/xui-agent.service" /etc/systemd/system/xui-agent.ser
 install -m 0644 "$temporary/xui-agent-xray.service" /etc/systemd/system/xui-agent-xray.service
 install -m 0644 "$temporary/xui-agent-xray.path" /etc/systemd/system/xui-agent-xray.path
 install -m 0755 "$temporary/uninstall.sh" /usr/local/sbin/xui-agent-uninstall
+runtime_marker_temporary="$RUNTIME_ASSETS_PATH.tmp-$$"
+printf '%s\n' "$runtime_assets_digest" > "$runtime_marker_temporary"
+chown root:xui-agent "$runtime_marker_temporary"
+chmod 0640 "$runtime_marker_temporary"
+mv -f "$runtime_marker_temporary" "$RUNTIME_ASSETS_PATH"
+runtime_marker_temporary=
 
 if [ ! -L "$STATE_DIRECTORY/current" ]; then
     bootstrap_digest=$(sha256sum "$temporary/xui-agent" | awk '{print substr($1, 1, 16)}')

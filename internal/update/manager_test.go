@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -25,11 +26,18 @@ func testArchive(t *testing.T, version string) []byte {
 	gz := gzip.NewWriter(&output)
 	tw := tar.NewWriter(gz)
 	binary := testBinary(version)
-	if err := tw.WriteHeader(&tar.Header{Name: "xui-agent", Mode: 0o755, Size: int64(len(binary)), Typeflag: tar.TypeReg}); err != nil {
-		t.Fatalf("write tar header: %v", err)
+	entries := map[string][]byte{"xui-agent": binary}
+	for _, name := range runtimeAssetNames {
+		entries[name] = []byte("test runtime asset " + name + "\n")
 	}
-	if _, err := tw.Write(binary); err != nil {
-		t.Fatalf("write tar body: %v", err)
+	for _, name := range append([]string{"xui-agent"}, runtimeAssetNames...) {
+		content := entries[name]
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+			t.Fatalf("write %s tar header: %v", name, err)
+		}
+		if _, err := tw.Write(content); err != nil {
+			t.Fatalf("write %s tar body: %v", name, err)
+		}
 	}
 	if err := tw.Close(); err != nil {
 		t.Fatalf("close tar: %v", err)
@@ -72,6 +80,10 @@ func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
 	}
 	archive := testArchive(t, "v1.2.3")
 	digest := sha256.Sum256(archive)
+	runtimeAssetsDigest, err := RuntimeAssetsDigest(archive)
+	if err != nil {
+		t.Fatalf("RuntimeAssetsDigest: %v", err)
+	}
 
 	assets := map[string][]byte{"/archive": archive}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,9 +97,10 @@ func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
 	defer server.Close()
 
 	manifest := Manifest{
-		SchemaVersion: 1,
-		Version:       "v1.2.3",
-		PublishedAt:   "2026-07-29T00:00:00Z",
+		SchemaVersion:       ManifestSchemaVersion,
+		Version:             "v1.2.3",
+		PublishedAt:         "2026-07-29T00:00:00Z",
+		RuntimeAssetsSHA256: runtimeAssetsDigest,
 		Artifacts: []Artifact{{
 			OS: "linux", Arch: runtimeArch(), URL: server.URL + "/archive",
 			SHA256: hex.EncodeToString(digest[:]), Size: int64(len(archive)),
@@ -101,7 +114,11 @@ func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
 	assets["/signature"] = []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, manifestRaw)))
 
 	state := setupManagedState(t)
-	manager, err := NewManager(state, base64.StdEncoding.EncodeToString(publicKey), true)
+	installedAssetsPath := filepath.Join(state, "runtime-assets.sha256")
+	if err := os.WriteFile(installedAssetsPath, []byte(runtimeAssetsDigest+"\n"), 0o640); err != nil {
+		t.Fatalf("write installed runtime assets: %v", err)
+	}
+	manager, err := NewManager(state, base64.StdEncoding.EncodeToString(publicKey), true, installedAssetsPath)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -192,7 +209,7 @@ func TestManagerRejectsInvalidSignatureWithoutSwitching(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(assets[r.URL.Path]) }))
 	defer server.Close()
 	state := setupManagedState(t)
-	manager, err := NewManager(state, base64.StdEncoding.EncodeToString(publicKey), true)
+	manager, err := NewManager(state, base64.StdEncoding.EncodeToString(publicKey), true, filepath.Join(state, "runtime-assets.sha256"))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -206,6 +223,28 @@ func TestManagerRejectsInvalidSignatureWithoutSwitching(t *testing.T) {
 	current, readErr := os.Readlink(filepath.Join(state, "current"))
 	if readErr != nil || current != "versions/bootstrap/xui-agent" {
 		t.Fatalf("current changed after rejected update: target=%q err=%v", current, readErr)
+	}
+}
+
+func TestManagerRequiresMatchingInstalledRuntimeAssets(t *testing.T) {
+	state := t.TempDir()
+	marker := filepath.Join(state, "runtime-assets.sha256")
+	manager := &Manager{installedAssetsPath: marker}
+	want := strings.Repeat("a", sha256.Size*2)
+	if err := manager.verifyInstalledRuntimeAssets(want); err == nil || !strings.Contains(err.Error(), "release installer") {
+		t.Fatalf("missing marker error = %v", err)
+	}
+	if err := os.WriteFile(marker, []byte(strings.Repeat("b", sha256.Size*2)+"\n"), 0o640); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	if err := manager.verifyInstalledRuntimeAssets(want); err == nil || !strings.Contains(err.Error(), "do not match") {
+		t.Fatalf("mismatched marker error = %v", err)
+	}
+	if err := os.WriteFile(marker, []byte(want+"\n"), 0o640); err != nil {
+		t.Fatalf("write matching marker: %v", err)
+	}
+	if err := manager.verifyInstalledRuntimeAssets(want); err != nil {
+		t.Fatalf("matching marker: %v", err)
 	}
 }
 

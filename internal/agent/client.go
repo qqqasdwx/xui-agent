@@ -65,7 +65,7 @@ func NewClient(cfg config.Config, version string) (*Client, error) {
 		return nil, err
 	}
 	startedAt := time.Now()
-	updater, err := updatepkg.NewManager(cfg.StateDirectory, cfg.Update.PublicKey, cfg.AllowInsecure)
+	updater, err := updatepkg.NewManager(cfg.StateDirectory, cfg.Update.PublicKey, cfg.AllowInsecure, cfg.Update.RuntimeAssetsPath)
 	if err != nil {
 		return nil, err
 	}

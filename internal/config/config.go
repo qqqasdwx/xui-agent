@@ -14,8 +14,9 @@ import (
 )
 
 const (
-	XrayModeObserve = "observe"
-	XrayModeManaged = "managed"
+	XrayModeObserve          = "observe"
+	XrayModeManaged          = "managed"
+	DefaultRuntimeAssetsPath = "/etc/xui-agent/runtime-assets.sha256"
 )
 
 type Config struct {
@@ -39,7 +40,8 @@ func (c XrayConfig) Managed() bool {
 }
 
 type UpdateConfig struct {
-	PublicKey string `json:"publicKey,omitempty"`
+	PublicKey         string `json:"publicKey,omitempty"`
+	RuntimeAssetsPath string `json:"runtimeAssetsPath,omitempty"`
 }
 
 func Load(path string) (Config, error) {
@@ -65,6 +67,9 @@ func Load(path string) (Config, error) {
 	}
 	if cfg.Xray.Mode == "" {
 		cfg.Xray.Mode = XrayModeObserve
+	}
+	if cfg.Update.RuntimeAssetsPath == "" {
+		cfg.Update.RuntimeAssetsPath = DefaultRuntimeAssetsPath
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -171,6 +176,9 @@ func (c Config) Validate() error {
 		if err != nil || len(raw) != ed25519.PublicKeySize {
 			return errors.New("update.publicKey must be a base64 Ed25519 public key")
 		}
+	}
+	if c.Update.RuntimeAssetsPath != "" && !filepath.IsAbs(c.Update.RuntimeAssetsPath) {
+		return errors.New("update.runtimeAssetsPath must be an absolute path")
 	}
 	return nil
 }

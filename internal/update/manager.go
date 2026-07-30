@@ -24,13 +24,23 @@ import (
 )
 
 const (
-	maxManifestBytes  = 1 << 20
-	maxSignatureBytes = 4 << 10
-	maxArchiveBytes   = 128 << 20
-	maxBinaryBytes    = 64 << 20
-	pendingFilename   = "update-pending.json"
-	failedFilename    = "update-failed.json"
+	maxManifestBytes      = 1 << 20
+	maxSignatureBytes     = 4 << 10
+	maxArchiveBytes       = 128 << 20
+	maxBinaryBytes        = 64 << 20
+	maxRuntimeAssetBytes  = 1 << 20
+	pendingFilename       = "update-pending.json"
+	failedFilename        = "update-failed.json"
+	ManifestSchemaVersion = 2
 )
+
+var runtimeAssetNames = []string{
+	"uninstall.sh",
+	"xui-agent-launcher",
+	"xui-agent-xray.path",
+	"xui-agent-xray.service",
+	"xui-agent.service",
+}
 
 var ErrRestartRequired = errors.New("agent restart required to activate the update")
 
@@ -43,10 +53,11 @@ type Artifact struct {
 }
 
 type Manifest struct {
-	SchemaVersion int        `json:"schemaVersion"`
-	Version       string     `json:"version"`
-	PublishedAt   string     `json:"publishedAt"`
-	Artifacts     []Artifact `json:"artifacts"`
+	SchemaVersion       int        `json:"schemaVersion"`
+	Version             string     `json:"version"`
+	PublishedAt         string     `json:"publishedAt"`
+	RuntimeAssetsSHA256 string     `json:"runtimeAssetsSha256"`
+	Artifacts           []Artifact `json:"artifacts"`
 }
 
 type Request struct {
@@ -65,16 +76,18 @@ type Pending struct {
 }
 
 type Manager struct {
-	stateDirectory string
-	publicKey      ed25519.PublicKey
-	allowInsecure  bool
-	httpClient     *http.Client
+	stateDirectory      string
+	publicKey           ed25519.PublicKey
+	allowInsecure       bool
+	installedAssetsPath string
+	httpClient          *http.Client
 }
 
-func NewManager(stateDirectory, publicKey string, allowInsecure bool) (*Manager, error) {
+func NewManager(stateDirectory, publicKey string, allowInsecure bool, installedAssetsPath string) (*Manager, error) {
 	m := &Manager{
-		stateDirectory: stateDirectory,
-		allowInsecure:  allowInsecure,
+		stateDirectory:      stateDirectory,
+		allowInsecure:       allowInsecure,
+		installedAssetsPath: installedAssetsPath,
 		httpClient: &http.Client{
 			Timeout: 2 * time.Minute,
 			CheckRedirect: func(request *http.Request, _ []*http.Request) error {
@@ -174,6 +187,9 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 	if request.Version != "" && manifest.Version != request.Version {
 		return "", fmt.Errorf("manifest version %q does not match requested version %q", manifest.Version, request.Version)
 	}
+	if err := m.verifyInstalledRuntimeAssets(manifest.RuntimeAssetsSHA256); err != nil {
+		return "", err
+	}
 	request.Version = manifest.Version
 	artifact, err := selectArtifact(manifest)
 	if err != nil {
@@ -190,11 +206,32 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 	if !strings.EqualFold(hex.EncodeToString(digest[:]), artifact.SHA256) {
 		return "", errors.New("update archive checksum does not match the manifest")
 	}
-	binary, err := extractBinary(archive)
+	binary, runtimeAssetsDigest, err := extractRelease(archive)
 	if err != nil {
 		return "", err
 	}
+	if runtimeAssetsDigest != manifest.RuntimeAssetsSHA256 {
+		return "", errors.New("update archive runtime assets do not match the manifest")
+	}
 	return m.install(ctx, request, binary)
+}
+
+func (m *Manager) verifyInstalledRuntimeAssets(want string) error {
+	if m.installedAssetsPath == "" {
+		return errors.New("runtime assets path is not configured; run the release installer")
+	}
+	raw, err := os.ReadFile(m.installedAssetsPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("runtime assets are not registered; run the release installer")
+		}
+		return fmt.Errorf("read installed runtime assets: %w", err)
+	}
+	got := strings.ToLower(strings.TrimSpace(string(raw)))
+	if len(got) != sha256.Size*2 || got != want {
+		return errors.New("installed runtime assets do not match the update; run the release installer")
+	}
+	return nil
 }
 
 func (m *Manager) install(ctx context.Context, request Request, binary []byte) (string, error) {
@@ -325,8 +362,15 @@ func decodeManifest(raw []byte) (Manifest, error) {
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		return Manifest{}, errors.New("update manifest contains trailing data")
 	}
-	if manifest.SchemaVersion != 1 || manifest.Version == "" || len(manifest.Artifacts) == 0 {
+	if manifest.SchemaVersion != ManifestSchemaVersion || manifest.Version == "" || len(manifest.Artifacts) == 0 {
 		return Manifest{}, errors.New("update manifest is incomplete or unsupported")
+	}
+	manifest.RuntimeAssetsSHA256 = strings.ToLower(strings.TrimSpace(manifest.RuntimeAssetsSHA256))
+	if len(manifest.RuntimeAssetsSHA256) != sha256.Size*2 {
+		return Manifest{}, errors.New("update manifest runtime assets digest is invalid")
+	}
+	if _, err := hex.DecodeString(manifest.RuntimeAssetsSHA256); err != nil {
+		return Manifest{}, errors.New("update manifest runtime assets digest is invalid")
 	}
 	if err := validateVersion(manifest.Version); err != nil {
 		return Manifest{}, err
@@ -350,37 +394,72 @@ func selectArtifact(manifest Manifest) (Artifact, error) {
 	return Artifact{}, fmt.Errorf("manifest has no artifact for %s/%s", runtime.GOOS, arch)
 }
 
-func extractBinary(archive []byte) ([]byte, error) {
+func RuntimeAssetsDigest(archive []byte) (string, error) {
+	_, digest, err := extractRelease(archive)
+	return digest, err
+}
+
+func extractRelease(archive []byte) ([]byte, string, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
-		return nil, fmt.Errorf("open update archive: %w", err)
+		return nil, "", fmt.Errorf("open update archive: %w", err)
 	}
 	defer gz.Close()
 	reader := tar.NewReader(gz)
 	var binary []byte
+	runtimeAssets := make(map[string][]byte, len(runtimeAssetNames))
+	expected := make(map[string]struct{}, len(runtimeAssetNames)+1)
+	expected["xui-agent"] = struct{}{}
+	for _, name := range runtimeAssetNames {
+		expected[name] = struct{}{}
+	}
 	for {
 		header, err := reader.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read update archive: %w", err)
+			return nil, "", fmt.Errorf("read update archive: %w", err)
 		}
-		if header.Name != "xui-agent" {
-			continue
+		if _, ok := expected[header.Name]; !ok {
+			return nil, "", fmt.Errorf("update archive contains unexpected entry %q", header.Name)
 		}
-		if header.Typeflag != tar.TypeReg || header.Size <= 0 || header.Size > maxBinaryBytes || binary != nil {
-			return nil, errors.New("update archive has an invalid xui-agent entry")
+		limit := int64(maxRuntimeAssetBytes)
+		if header.Name == "xui-agent" {
+			limit = maxBinaryBytes
 		}
-		binary, err = io.ReadAll(io.LimitReader(reader, maxBinaryBytes+1))
-		if err != nil || int64(len(binary)) != header.Size {
-			return nil, errors.New("read xui-agent from update archive")
+		if header.Typeflag != tar.TypeReg || header.Size <= 0 || header.Size > limit {
+			return nil, "", fmt.Errorf("update archive has an invalid %s entry", header.Name)
+		}
+		content, readErr := io.ReadAll(io.LimitReader(reader, limit+1))
+		if readErr != nil || int64(len(content)) != header.Size {
+			return nil, "", fmt.Errorf("read %s from update archive", header.Name)
+		}
+		if header.Name == "xui-agent" {
+			if binary != nil {
+				return nil, "", errors.New("update archive has duplicate xui-agent entries")
+			}
+			binary = content
+		} else {
+			if _, exists := runtimeAssets[header.Name]; exists {
+				return nil, "", fmt.Errorf("update archive has duplicate %s entries", header.Name)
+			}
+			runtimeAssets[header.Name] = content
 		}
 	}
 	if binary == nil {
-		return nil, errors.New("update archive does not contain xui-agent")
+		return nil, "", errors.New("update archive does not contain xui-agent")
 	}
-	return binary, nil
+	hasher := sha256.New()
+	for _, name := range runtimeAssetNames {
+		content, ok := runtimeAssets[name]
+		if !ok {
+			return nil, "", fmt.Errorf("update archive does not contain %s", name)
+		}
+		digest := sha256.Sum256(content)
+		_, _ = fmt.Fprintf(hasher, "%x  %s\n", digest, name)
+	}
+	return binary, hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func validateVersion(version string) error {

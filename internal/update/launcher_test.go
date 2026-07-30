@@ -51,7 +51,7 @@ func TestLauncherRollsBackAFailedPendingVersion(t *testing.T) {
 	if current != "versions/old/xui-agent" {
 		t.Fatalf("current target = %q, want previous version", current)
 	}
-	failed, err := NewManager(state, "", false)
+	failed, err := NewManager(state, "", false, "")
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}

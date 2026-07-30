@@ -48,7 +48,7 @@ func createManifest(dist, version, repository, publishedAt, encodedPrivateKey st
 		return err
 	}
 
-	manifest := updatepkg.Manifest{SchemaVersion: 1, Version: version, PublishedAt: publishedAt}
+	manifest := updatepkg.Manifest{SchemaVersion: updatepkg.ManifestSchemaVersion, Version: version, PublishedAt: publishedAt}
 	for _, arch := range []string{"amd64", "arm64", "armv7"} {
 		name := "xui-agent-linux-" + arch + ".tar.gz"
 		path := filepath.Join(dist, name)
@@ -57,6 +57,15 @@ func createManifest(dist, version, repository, publishedAt, encodedPrivateKey st
 			return fmt.Errorf("read %s: %w", path, err)
 		}
 		digest := sha256.Sum256(raw)
+		runtimeAssetsDigest, err := updatepkg.RuntimeAssetsDigest(raw)
+		if err != nil {
+			return fmt.Errorf("inspect runtime assets in %s: %w", path, err)
+		}
+		if manifest.RuntimeAssetsSHA256 == "" {
+			manifest.RuntimeAssetsSHA256 = runtimeAssetsDigest
+		} else if manifest.RuntimeAssetsSHA256 != runtimeAssetsDigest {
+			return errors.New("release archives contain different runtime assets")
+		}
 		manifest.Artifacts = append(manifest.Artifacts, updatepkg.Artifact{
 			OS:     "linux",
 			Arch:   arch,

@@ -393,7 +393,7 @@ func TestExecuteCommandRejectsCorruptUpdateState(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(state, tc.filename), []byte("not-json"), 0o600); err != nil {
 				t.Fatalf("write corrupt state: %v", err)
 			}
-			manager, err := updatepkg.NewManager(state, "", false)
+			manager, err := updatepkg.NewManager(state, "", false, "")
 			if err != nil {
 				t.Fatalf("NewManager: %v", err)
 			}
