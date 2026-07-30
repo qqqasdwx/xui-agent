@@ -1,0 +1,43 @@
+#!/bin/sh
+set -u
+
+STATE_DIRECTORY=${XUI_AGENT_STATE_DIRECTORY:-/var/lib/xui-agent}
+CONFIG_PATH=${XUI_AGENT_CONFIG_PATH:-/etc/xui-agent/config.json}
+CURRENT_LINK="$STATE_DIRECTORY/current"
+PREVIOUS_LINK="$STATE_DIRECTORY/previous"
+PENDING_FILE="$STATE_DIRECTORY/update-pending.json"
+FAILED_FILE="$STATE_DIRECTORY/update-failed.json"
+
+switch_link() {
+    target=$1
+    temporary="$CURRENT_LINK.rollback-$$"
+    rm -f "$temporary"
+    ln -s "$target" "$temporary" || return 1
+    mv -Tf "$temporary" "$CURRENT_LINK"
+}
+
+while :; do
+    current=$(readlink -f "$CURRENT_LINK") || exit 1
+    case "$current" in
+        "$STATE_DIRECTORY"/versions/*/xui-agent) ;;
+        *) echo "xui-agent current target is outside the managed versions directory" >&2; exit 1 ;;
+    esac
+
+    "$current" run -config "$CONFIG_PATH"
+    status=$?
+
+    if [ -f "$PENDING_FILE" ]; then
+        if [ "$status" -eq 75 ]; then
+            continue
+        fi
+        previous=$(readlink "$PREVIOUS_LINK") || exit "$status"
+        if ! switch_link "$previous"; then
+            echo "xui-agent automatic rollback failed" >&2
+            exit "$status"
+        fi
+        mv -f "$PENDING_FILE" "$FAILED_FILE"
+        echo "xui-agent update failed health validation; restored previous version" >&2
+        continue
+    fi
+    exit "$status"
+done

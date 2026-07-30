@@ -1,0 +1,14 @@
+{
+  "serverUrl": "https://panel.example.com/secret-path",
+  "stateDirectory": "/var/lib/xui-agent",
+  "allowInsecure": false,
+  "serverCertSha256": "",
+  "update": {
+    "publicKey": ""
+  },
+  "xray": {
+    "binaryPath": "/usr/local/x-ui/bin/xray-linux-amd64",
+    "configPath": "/usr/local/x-ui/bin/config.json",
+    "pidFile": ""
+  }
+}
