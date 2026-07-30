@@ -53,6 +53,23 @@ func TestManagedRuntimeWithSystemd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read v2 target: %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(Directory(state), secondTarget), []byte(`{"marker":"tampered"}`), configFileMode); err != nil {
+		t.Fatalf("tamper v2 config: %v", err)
+	}
+	result, err = manager.Apply(context.Background(), second)
+	if err != nil || !result.Success() {
+		t.Fatalf("repair v2 result=%+v err=%v", result, err)
+	}
+	repairedPID := readIntegrationPID(t, state)
+	if repairedPID == secondPID {
+		t.Fatal("v2 repair did not replace the Xray process")
+	}
+	repairedTarget, err := os.Readlink(CurrentConfigPath(state))
+	if err != nil || repairedTarget == secondTarget || !strings.Contains(repairedTarget, "-repair-") {
+		t.Fatalf("repaired v2 target=%q err=%v", repairedTarget, err)
+	}
+	secondPID = repairedPID
+	secondTarget = repairedTarget
 
 	failed := integrationRequest(3, `{"marker":"v3","failStart":true}`)
 	result, err = manager.Apply(context.Background(), failed)
@@ -68,7 +85,7 @@ func TestManagedRuntimeWithSystemd(t *testing.T) {
 	}
 
 	fourth := integrationRequest(4, `{"marker":"v4"}`)
-	fourthTarget, err := manager.installVersion(fourth)
+	fourthTarget, err := manager.installVersion(fourth, false)
 	if err != nil {
 		t.Fatalf("install v4: %v", err)
 	}

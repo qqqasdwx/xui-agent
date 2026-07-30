@@ -123,6 +123,7 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 	if err := m.ensureDirectory(); err != nil {
 		return Result{}, err
 	}
+	repair := false
 	applied, err := m.loadApplied()
 	if err == nil {
 		switch {
@@ -131,24 +132,29 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 		case request.ConfigVersion == applied.ConfigVersion && request.ConfigDigest != applied.ConfigDigest:
 			return Result{}, fmt.Errorf("applied config version %d has a different digest", request.ConfigVersion)
 		case request.ConfigVersion == applied.ConfigVersion:
-			if err := m.verifyApplied(applied); err != nil {
-				return Result{}, err
+			if err := m.verifyApplied(applied); err == nil {
+				return resultFromApplied(applied), nil
 			}
-			return resultFromApplied(applied), nil
+			repair = true
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return Result{}, fmt.Errorf("load applied Xray config state: %w", err)
 	}
 
-	target, err := m.installVersion(request)
+	target, err := m.installVersion(request, repair)
 	if err != nil {
 		return Result{}, err
 	}
-	previousTarget, err := m.currentTarget()
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return Result{}, fmt.Errorf("read current Xray config target: %w", err)
+	var previousTarget string
+	if repair {
+		previousTarget, err = m.previousTarget()
+	} else {
+		previousTarget, err = m.currentTarget()
 	}
-	if applied != nil && previousTarget == "" {
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return Result{}, fmt.Errorf("read previous Xray config target: %w", err)
+	}
+	if applied != nil && previousTarget == "" && !repair {
 		return Result{}, errors.New("applied Xray config has no current target")
 	}
 	pending := pendingState{
@@ -287,7 +293,7 @@ func (m *Manager) rollback(ctx context.Context, pending pendingState, failure st
 	return removeAndSync(m.pendingPath())
 }
 
-func (m *Manager) installVersion(request Request) (string, error) {
+func (m *Manager) installVersion(request Request, repair bool) (string, error) {
 	versionsDirectory := filepath.Join(m.directory, versionsName)
 	if err := os.MkdirAll(versionsDirectory, stateDirectoryMode); err != nil {
 		return "", fmt.Errorf("create Xray config versions directory: %w", err)
@@ -300,22 +306,39 @@ func (m *Manager) installVersion(request Request) (string, error) {
 	path := filepath.Join(m.directory, target)
 	if raw, err := os.ReadFile(path); err == nil {
 		digest := sha256.Sum256(raw)
-		if !bytes.Equal(digest[:], mustDecodeDigest(request.ConfigDigest)) || !bytes.Equal(raw, request.Config) {
-			return "", errors.New("existing Xray config version content does not match")
-		}
-		info, err := os.Stat(path)
+		info, err := os.Lstat(path)
 		if err != nil {
 			return "", err
 		}
-		if info.Mode().Perm() != configFileMode {
+		contentMatches := bytes.Equal(digest[:], mustDecodeDigest(request.ConfigDigest)) && bytes.Equal(raw, request.Config)
+		permissionsMatch := info.Mode().IsRegular() && info.Mode().Perm() == configFileMode
+		if contentMatches && permissionsMatch {
+			return target, nil
+		}
+		if !repair {
+			if !contentMatches {
+				return "", errors.New("existing Xray config version content does not match")
+			}
 			return "", errors.New("existing Xray config version has unsafe permissions")
 		}
-		return target, nil
+		return m.writeRepairVersion(request)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
+	if repair {
+		return m.writeRepairVersion(request)
+	}
 	if err := writeAtomic(path, request.Config, configFileMode); err != nil {
 		return "", fmt.Errorf("write versioned Xray config: %w", err)
+	}
+	return target, nil
+}
+
+func (m *Manager) writeRepairVersion(request Request) (string, error) {
+	name := fmt.Sprintf("%020d-%s-repair-%d.json", request.ConfigVersion, request.ConfigDigest, time.Now().UnixNano())
+	target := filepath.Join(versionsName, name)
+	if err := writeAtomic(filepath.Join(m.directory, target), request.Config, configFileMode); err != nil {
+		return "", fmt.Errorf("write repaired Xray config: %w", err)
 	}
 	return target, nil
 }
@@ -334,6 +357,13 @@ func (m *Manager) verifyApplied(applied *AppliedState) error {
 	raw, err := os.ReadFile(filepath.Join(m.directory, applied.Target))
 	if err != nil {
 		return fmt.Errorf("read applied Xray config: %w", err)
+	}
+	info, err := os.Lstat(filepath.Join(m.directory, applied.Target))
+	if err != nil {
+		return fmt.Errorf("inspect applied Xray config: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm() != configFileMode {
+		return errors.New("current Xray config has unsafe permissions or file type")
 	}
 	digest := sha256.Sum256(raw)
 	if hex.EncodeToString(digest[:]) != applied.ConfigDigest {
@@ -387,6 +417,17 @@ func (m *Manager) loadPending() (*pendingState, error) {
 
 func (m *Manager) currentTarget() (string, error) {
 	target, err := os.Readlink(m.currentPath())
+	if err != nil {
+		return "", err
+	}
+	if err := validateTarget(target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func (m *Manager) previousTarget() (string, error) {
+	target, err := os.Readlink(m.previousPath())
 	if err != nil {
 		return "", err
 	}

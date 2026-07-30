@@ -1,6 +1,7 @@
 package xrayruntime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -208,7 +209,7 @@ func TestManagerRecoversUnconfirmedSwitchByRollingBack(t *testing.T) {
 	}
 	firstTarget, _ := os.Readlink(CurrentConfigPath(state))
 	second := runtimeRequest(2, `{"version":2}`)
-	secondTarget, err := manager.installVersion(second)
+	secondTarget, err := manager.installVersion(second, false)
 	if err != nil {
 		t.Fatalf("install second: %v", err)
 	}
@@ -236,5 +237,88 @@ func TestManagerRecoversUnconfirmedSwitchByRollingBack(t *testing.T) {
 	current, err := manager.Current()
 	if err != nil || current.ConfigVersion != 1 {
 		t.Fatalf("applied state=%+v err=%v", current, err)
+	}
+}
+
+func TestManagerRepairsDriftedAppliedConfigFromSameVersion(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+
+	first := runtimeRequest(1, `{"version":1}`)
+	if result, err := manager.Apply(context.Background(), first); err != nil || !result.Success() {
+		t.Fatalf("apply first result=%+v err=%v", result, err)
+	}
+	firstTarget, _ := os.Readlink(CurrentConfigPath(state))
+	second := runtimeRequest(2, `{"version":2}`)
+	if result, err := manager.Apply(context.Background(), second); err != nil || !result.Success() {
+		t.Fatalf("apply second result=%+v err=%v", result, err)
+	}
+	driftedTarget, _ := os.Readlink(CurrentConfigPath(state))
+	if err := os.WriteFile(filepath.Join(Directory(state), driftedTarget), []byte(`{"drifted":true}`), configFileMode); err != nil {
+		t.Fatalf("tamper applied config: %v", err)
+	}
+
+	repaired, err := manager.Apply(context.Background(), second)
+	if err != nil || !repaired.Success() {
+		t.Fatalf("repair result=%+v err=%v", repaired, err)
+	}
+	repairedTarget, err := os.Readlink(CurrentConfigPath(state))
+	if err != nil {
+		t.Fatalf("read repaired target: %v", err)
+	}
+	if repairedTarget == driftedTarget || !strings.Contains(repairedTarget, "-repair-") {
+		t.Fatalf("repaired target=%q, want a new immutable repair target", repairedTarget)
+	}
+	raw, err := os.ReadFile(filepath.Join(Directory(state), repairedTarget))
+	if err != nil || !bytes.Equal(raw, second.Config) {
+		t.Fatalf("repaired config=%q err=%v", raw, err)
+	}
+	previous, err := os.Readlink(filepath.Join(Directory(state), previousName))
+	if err != nil || previous != firstTarget {
+		t.Fatalf("previous target=%q err=%v, want %q", previous, err, firstTarget)
+	}
+	current, err := manager.Current()
+	if err != nil || current.ConfigVersion != second.ConfigVersion || current.ConfigDigest != second.ConfigDigest || current.Target != repairedTarget {
+		t.Fatalf("current=%+v err=%v", current, err)
+	}
+	if controller.restarts != 3 {
+		t.Fatalf("restart calls=%d, want first, second, repair", controller.restarts)
+	}
+	if duplicate, err := manager.Apply(context.Background(), second); err != nil || !duplicate.Success() || controller.restarts != 3 {
+		t.Fatalf("duplicate after repair=%+v err=%v restarts=%d", duplicate, err, controller.restarts)
+	}
+}
+
+func TestManagerRepairsAppliedConfigPermissionDrift(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+	manager := NewManager(state, validator, controller)
+
+	request := runtimeRequest(1, `{"version":1}`)
+	if result, err := manager.Apply(context.Background(), request); err != nil || !result.Success() {
+		t.Fatalf("apply result=%+v err=%v", result, err)
+	}
+	driftedTarget, _ := os.Readlink(CurrentConfigPath(state))
+	if err := os.Chmod(filepath.Join(Directory(state), driftedTarget), 0o644); err != nil {
+		t.Fatalf("change applied config permissions: %v", err)
+	}
+
+	repaired, err := manager.Apply(context.Background(), request)
+	if err != nil || !repaired.Success() {
+		t.Fatalf("repair result=%+v err=%v", repaired, err)
+	}
+	repairedTarget, err := os.Readlink(CurrentConfigPath(state))
+	if err != nil || repairedTarget == driftedTarget || !strings.Contains(repairedTarget, "-repair-") {
+		t.Fatalf("repaired target=%q err=%v", repairedTarget, err)
+	}
+	info, err := os.Stat(filepath.Join(Directory(state), repairedTarget))
+	if err != nil {
+		t.Fatalf("inspect repaired config: %v", err)
+	}
+	if info.Mode().Perm() != configFileMode {
+		t.Fatalf("repaired mode=%v", info.Mode().Perm())
 	}
 }
