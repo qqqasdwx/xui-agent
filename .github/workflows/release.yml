@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Verify
+        run: make verify
+      - name: Build deterministic Linux archives
+        run: ./scripts/build-release.sh "${GITHUB_REF_NAME}" dist
+      - name: Create signed release manifest
+        env:
+          XUI_AGENT_RELEASE_PRIVATE_KEY: ${{ secrets.XUI_AGENT_RELEASE_PRIVATE_KEY }}
+        run: |
+          published_at=$(git show -s --format=%cI HEAD)
+          release_public_key=$(go run ./cmd/xui-agent-release \
+            -dist dist \
+            -version "${GITHUB_REF_NAME}" \
+            -repository "${GITHUB_REPOSITORY}" \
+            -published-at "$published_at" |
+            sed -n 's/^release public key: //p')
+          expected_public_key=$(tr -d '\r\n' < deploy/release-public-key.txt)
+          if [ -z "$release_public_key" ] || [ "$release_public_key" != "$expected_public_key" ]; then
+            echo "release signing key does not match deploy/release-public-key.txt" >&2
+            exit 1
+          fi
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          overwrite_files: false
+          fail_on_unmatched_files: true
+          files: |
+            dist/xui-agent-linux-*.tar.gz
+            dist/install.sh
+            dist/SHA256SUMS
+            dist/manifest.json
+            dist/manifest.sig
+            deploy/release-public-key.txt
