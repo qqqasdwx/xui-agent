@@ -11,27 +11,13 @@ import (
 	"time"
 )
 
-const helperProcessEnv = "XUI_AGENT_XRAY_RUNTIME_HELPER"
-
-func TestXrayRuntimeHelperProcess(t *testing.T) {
-	if os.Getenv(helperProcessEnv) != "1" {
-		return
-	}
-	for {
-		time.Sleep(time.Second)
-	}
-}
-
 func TestProcessControllerRestartsManagedExecutable(t *testing.T) {
 	state := t.TempDir()
 	if err := os.MkdirAll(Directory(state), stateDirectoryMode); err != nil {
 		t.Fatalf("create runtime directory: %v", err)
 	}
-	binary, err := filepath.EvalSymlinks(os.Args[0])
-	if err != nil {
-		t.Fatalf("resolve test executable: %v", err)
-	}
-	oldProcess := startRuntimeHelper(t)
+	binary := runtimeHelperBinary(t)
+	oldProcess := startRuntimeHelper(t, binary)
 	defer func() {
 		if oldProcess.ProcessState == nil {
 			_ = oldProcess.Process.Kill()
@@ -70,7 +56,7 @@ func TestProcessControllerRestartsManagedExecutable(t *testing.T) {
 				return
 			}
 		}
-		next := startRuntimeHelperCommand()
+		next := startRuntimeHelperCommand(binary)
 		if err := next.Start(); err != nil {
 			workerError <- err
 			return
@@ -119,11 +105,8 @@ func TestProcessControllerRejectsPIDForDifferentExecutable(t *testing.T) {
 }
 
 func TestProcessCommandMatchesManagedExecutable(t *testing.T) {
-	binary, err := filepath.EvalSymlinks(os.Args[0])
-	if err != nil {
-		t.Fatalf("resolve test executable: %v", err)
-	}
-	process := startRuntimeHelper(t)
+	binary := runtimeHelperBinary(t)
+	process := startRuntimeHelper(t, binary)
 	defer func() {
 		_ = process.Process.Kill()
 		_ = process.Wait()
@@ -138,17 +121,41 @@ func TestProcessCommandMatchesManagedExecutable(t *testing.T) {
 	}
 }
 
-func startRuntimeHelper(t *testing.T) *exec.Cmd {
+func runtimeHelperBinary(t *testing.T) string {
 	t.Helper()
-	command := startRuntimeHelperCommand()
+	binary, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatalf("find runtime helper executable: %v", err)
+	}
+	binary, err = filepath.EvalSymlinks(binary)
+	if err != nil {
+		t.Fatalf("resolve runtime helper executable: %v", err)
+	}
+	return binary
+}
+
+func startRuntimeHelper(t *testing.T, binary string) *exec.Cmd {
+	t.Helper()
+	command := startRuntimeHelperCommand(binary)
 	if err := command.Start(); err != nil {
 		t.Fatalf("start runtime helper: %v", err)
 	}
-	return command
+	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		matches, err := processCommandMatches(command.Process.Pid, binary)
+		if err == nil && matches {
+			return command
+		}
+		lastErr = err
+		time.Sleep(time.Millisecond)
+	}
+	_ = command.Process.Kill()
+	_ = command.Wait()
+	t.Fatalf("runtime helper did not become ready: %v", lastErr)
+	return nil
 }
 
-func startRuntimeHelperCommand() *exec.Cmd {
-	command := exec.Command(os.Args[0], "-test.run=^TestXrayRuntimeHelperProcess$")
-	command.Env = append(os.Environ(), helperProcessEnv+"=1")
-	return command
+func startRuntimeHelperCommand(binary string) *exec.Cmd {
+	return exec.Command(binary, "300")
 }
