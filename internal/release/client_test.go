@@ -1,6 +1,7 @@
 package release
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -74,6 +75,28 @@ func TestDownloadAllowsSecureReleaseRedirectQuery(t *testing.T) {
 	}
 	if string(raw) != "artifact" {
 		t.Fatalf("Download=%q, want artifact", raw)
+	}
+}
+
+func TestDownloadToStreamsAndEnforcesLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write([]byte("artifact"))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	var output bytes.Buffer
+	written, err := client.DownloadTo(context.Background(), server.URL+"/release", 8, &output)
+	if err != nil || written != 8 || output.String() != "artifact" {
+		t.Fatalf("DownloadTo written=%d output=%q err=%v", written, output.String(), err)
+	}
+	output.Reset()
+	written, err = client.DownloadTo(context.Background(), server.URL+"/release", 7, &output)
+	if err == nil || written != 8 {
+		t.Fatalf("oversized DownloadTo written=%d err=%v", written, err)
 	}
 }
 

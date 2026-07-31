@@ -1,6 +1,7 @@
 package xrayupdate
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -222,19 +223,32 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
 	}
-	archive, err := m.releases.Download(ctx, archiveURL, maxArchiveBytes)
+	archive, err := os.CreateTemp("", ".xui-agent-xray-release-*")
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("create Xray release temporary file: %w", err))
+	}
+	archivePath := archive.Name()
+	defer os.Remove(archivePath)
+	defer archive.Close()
+	if err := archive.Chmod(stateFileMode); err != nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("secure Xray release temporary file: %w", err))
+	}
+	hasher := sha256.New()
+	size, err := m.releases.DownloadTo(ctx, archiveURL, artifact.Size, io.MultiWriter(archive, hasher))
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, fmt.Errorf("download Xray release archive: %w", err))
 	}
-	if int64(len(archive)) != artifact.Size {
+	if size != artifact.Size {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, errors.New("Xray release archive size does not match the manifest"))
 	}
-	digest := sha256.Sum256(archive)
-	archiveDigest := hex.EncodeToString(digest[:])
+	archiveDigest := hex.EncodeToString(hasher.Sum(nil))
 	if archiveDigest != artifact.SHA256 {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, errors.New("Xray release archive digest does not match the manifest"))
 	}
-	return m.install(ctx, request.CommandID, manifest.Version, manifest.XrayVersion, archiveDigest, archive)
+	if err := archive.Sync(); err != nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("sync Xray release temporary file: %w", err))
+	}
+	return m.installArchive(ctx, request.CommandID, manifest.Version, manifest.XrayVersion, archiveDigest, archive)
 }
 
 func (m *Manager) InstallLocal(ctx context.Context, commandID, version string, archive []byte) (Result, error) {
@@ -256,6 +270,40 @@ func (m *Manager) install(ctx context.Context, commandID, version, xrayVersion, 
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
 	}
+	return m.installPrepared(ctx, commandID, version, xrayVersion, archiveDigest, func() (string, error) {
+		return m.installBundle(version, xrayVersion, archiveDigest, candidate)
+	})
+}
+
+func (m *Manager) installArchive(ctx context.Context, commandID, version, xrayVersion, archiveDigest string, archive *os.File) (Result, error) {
+	if archive == nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, errors.New("Xray release temporary file is unavailable"))
+	}
+	info, err := archive.Stat()
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("inspect Xray release temporary file: %w", err))
+	}
+	if !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maxArchiveBytes {
+		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, errors.New("Xray release archive is not a secure regular file"))
+	}
+	reader, err := zip.NewReader(archive, info.Size())
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, fmt.Errorf("open Xray release archive: %w", err))
+	}
+	entries, err := validateBundleArchive(reader)
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
+	}
+	return m.installPrepared(ctx, commandID, version, xrayVersion, archiveDigest, func() (string, error) {
+		return m.installBundleArchive(version, xrayVersion, archiveDigest, entries)
+	})
+}
+
+func (m *Manager) installPrepared(
+	ctx context.Context,
+	commandID, version, xrayVersion, archiveDigest string,
+	installCandidate func() (string, error),
+) (Result, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.ensureDirectory(); err != nil {
@@ -269,7 +317,7 @@ func (m *Manager) install(ctx context.Context, commandID, version, xrayVersion, 
 	if err := m.pruneVersions(); err != nil {
 		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("garbage collect Xray versions: %w", err))
 	}
-	target, err := m.installBundle(version, xrayVersion, archiveDigest, candidate)
+	target, err := installCandidate()
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, err)
 	}
@@ -516,6 +564,53 @@ func (m *Manager) appliedConfigPath() (string, bool, error) {
 }
 
 func (m *Manager) installBundle(version, xrayVersion, archiveDigest string, candidate bundle) (string, error) {
+	return m.installBundleFiles(version, xrayVersion, archiveDigest, func(directory string) (map[string]string, error) {
+		digests := make(map[string]string, len(requiredBundleFiles))
+		for _, fileName := range requiredBundleFiles {
+			raw := candidate.files[fileName]
+			mode := os.FileMode(stateFileMode)
+			if fileName == "xray" {
+				mode = 0o700
+			}
+			if err := writeAtomic(filepath.Join(directory, fileName), raw, mode); err != nil {
+				return nil, err
+			}
+			digest := sha256.Sum256(raw)
+			digests[fileName] = hex.EncodeToString(digest[:])
+		}
+		return digests, nil
+	})
+}
+
+func (m *Manager) installBundleArchive(version, xrayVersion, archiveDigest string, entries []*zip.File) (string, error) {
+	return m.installBundleFiles(version, xrayVersion, archiveDigest, func(directory string) (map[string]string, error) {
+		digests := make(map[string]string, len(requiredBundleFiles))
+		for _, entry := range entries {
+			limit := bundleEntryLimit(entry.Name)
+			if !isRequiredBundleFile(entry.Name) {
+				if _, err := copyBundleEntry(entry, io.Discard, limit); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			mode := os.FileMode(stateFileMode)
+			if entry.Name == "xray" {
+				mode = 0o700
+			}
+			digest, err := writeBundleEntry(filepath.Join(directory, entry.Name), entry, limit, mode)
+			if err != nil {
+				return nil, err
+			}
+			digests[entry.Name] = digest
+		}
+		return digests, nil
+	})
+}
+
+func (m *Manager) installBundleFiles(
+	version, xrayVersion, archiveDigest string,
+	writeFiles func(string) (map[string]string, error),
+) (string, error) {
 	name := version + "-" + archiveDigest
 	target := filepath.Join(versionsName, name)
 	path := filepath.Join(m.directory, target)
@@ -543,19 +638,16 @@ func (m *Manager) installBundle(version, xrayVersion, archiveDigest string, cand
 	if err := os.Chmod(temporary, stateDirectoryMode); err != nil {
 		return "", err
 	}
-	state := bundleState{Version: version, XrayVersion: xrayVersion, ArchiveDigest: archiveDigest, Files: make(map[string]string, len(requiredBundleFiles))}
-	for _, fileName := range requiredBundleFiles {
-		raw := candidate.files[fileName]
-		mode := os.FileMode(stateFileMode)
-		if fileName == "xray" {
-			mode = 0o700
-		}
-		if err := writeAtomic(filepath.Join(temporary, fileName), raw, mode); err != nil {
-			return "", err
-		}
-		digest := sha256.Sum256(raw)
-		state.Files[fileName] = hex.EncodeToString(digest[:])
+	fileDigests, err := writeFiles(temporary)
+	if err != nil {
+		return "", err
 	}
+	for _, fileName := range requiredBundleFiles {
+		if len(fileDigests[fileName]) != sha256.Size*2 {
+			return "", fmt.Errorf("Xray bundle digest for %s is invalid", fileName)
+		}
+	}
+	state := bundleState{Version: version, XrayVersion: xrayVersion, ArchiveDigest: archiveDigest, Files: fileDigests}
 	if err := writeJSONAtomic(filepath.Join(temporary, bundleStateName), state, stateFileMode); err != nil {
 		return "", err
 	}
@@ -569,6 +661,52 @@ func (m *Manager) installBundle(version, xrayVersion, archiveDigest string, cand
 		return "", err
 	}
 	return target, nil
+}
+
+func writeBundleEntry(path string, entry *zip.File, limit int64, mode os.FileMode) (string, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return "", err
+	}
+	if err := file.Chmod(mode); err != nil {
+		file.Close()
+		return "", err
+	}
+	hasher := sha256.New()
+	_, copyErr := copyBundleEntry(entry, io.MultiWriter(file, hasher), limit)
+	if copyErr == nil {
+		copyErr = file.Sync()
+	}
+	closeErr := file.Close()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func copyBundleEntry(entry *zip.File, destination io.Writer, limit int64) (int64, error) {
+	if entry == nil || destination == nil || limit <= 0 {
+		return 0, errors.New("Xray release archive entry is invalid")
+	}
+	stream, err := entry.Open()
+	if err != nil {
+		return 0, err
+	}
+	written, copyErr := io.Copy(destination, io.LimitReader(stream, limit+1))
+	closeErr := stream.Close()
+	if copyErr != nil {
+		return written, copyErr
+	}
+	if closeErr != nil {
+		return written, closeErr
+	}
+	if written != int64(entry.UncompressedSize64) || written > limit {
+		return written, fmt.Errorf("Xray release entry %q exceeds its size limit", entry.Name)
+	}
+	return written, nil
 }
 
 func (m *Manager) verifyApplied(applied *AppliedState) error {
@@ -652,27 +790,50 @@ func (m *Manager) loadVerifiedTarget(target string) (*bundleState, error) {
 			return nil, fmt.Errorf("Xray bundle digest for %s is invalid", fileName)
 		}
 		filePath := filepath.Join(path, fileName)
-		fileInfo, err := os.Lstat(filePath)
-		if err != nil {
-			return nil, err
-		}
 		wantMode := os.FileMode(stateFileMode)
 		if fileName == "xray" {
 			wantMode = 0o700
 		}
-		if !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm() != wantMode {
-			return nil, fmt.Errorf("Xray bundle file %s has unsafe permissions or type", fileName)
-		}
-		raw, err := os.ReadFile(filePath)
+		got, err := hashBundleFile(filePath, bundleEntryLimit(fileName), wantMode)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("verify Xray bundle file %s: %w", fileName, err)
 		}
-		digest := sha256.Sum256(raw)
-		if hex.EncodeToString(digest[:]) != want {
+		if got != want {
 			return nil, fmt.Errorf("Xray bundle file %s digest mismatch", fileName)
 		}
 	}
 	return &state, nil
+}
+
+func hashBundleFile(path string, limit int64, mode os.FileMode) (string, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !pathInfo.Mode().IsRegular() || pathInfo.Mode().Perm() != mode {
+		return "", errors.New("file has unsafe permissions or type")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !os.SameFile(pathInfo, info) || !info.Mode().IsRegular() || info.Mode().Perm() != mode || info.Size() <= 0 || info.Size() > limit {
+		return "", errors.New("file has unsafe permissions, type, or size")
+	}
+	hasher := sha256.New()
+	written, err := io.Copy(hasher, io.LimitReader(file, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if written != info.Size() || written > limit {
+		return "", errors.New("file exceeds its size limit")
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func (m *Manager) ensureDirectory() error {

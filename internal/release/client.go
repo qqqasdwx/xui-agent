@@ -1,6 +1,7 @@
 package release
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -49,33 +50,41 @@ func (c *Client) URL(repository, version, asset string) (string, error) {
 }
 
 func (c *Client) Download(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
-	if c == nil || limit <= 0 {
-		return nil, errors.New("release download is not configured")
+	var output bytes.Buffer
+	if _, err := c.DownloadTo(ctx, rawURL, limit, &output); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
+}
+
+func (c *Client) DownloadTo(ctx context.Context, rawURL string, limit int64, destination io.Writer) (int64, error) {
+	if c == nil || limit <= 0 || destination == nil {
+		return 0, errors.New("release download is not configured")
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil || c.validateInitialURL(u) != nil {
-		return nil, errors.New("release URL must be absolute HTTPS without credentials, query, or fragment")
+		return 0, errors.New("release URL must be absolute HTTPS without credentials, query, or fragment")
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d", response.StatusCode)
+		return 0, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
-	raw, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
+	written, err := io.Copy(destination, io.LimitReader(response.Body, limit+1))
 	if err != nil {
-		return nil, err
+		return written, err
 	}
-	if int64(len(raw)) > limit {
-		return nil, errors.New("release download exceeds the size limit")
+	if written > limit {
+		return written, errors.New("release download exceeds the size limit")
 	}
-	return raw, nil
+	return written, nil
 }
 
 func (c *Client) validateInitialURL(u *url.URL) error {

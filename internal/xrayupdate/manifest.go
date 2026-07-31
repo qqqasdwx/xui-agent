@@ -107,27 +107,13 @@ func extractBundle(archive []byte) (bundle, error) {
 	if err != nil {
 		return bundle{}, fmt.Errorf("open Xray release archive: %w", err)
 	}
-	allowed := map[string]int64{
-		"xray": maxBinaryBytes, "geoip.dat": maxAssetBytes, "geosite.dat": maxAssetBytes,
-		"LICENSE": 1 << 20, "README.md": 1 << 20,
+	entries, err := validateBundleArchive(reader)
+	if err != nil {
+		return bundle{}, err
 	}
 	files := make(map[string][]byte, len(requiredBundleFiles))
-	var expanded int64
-	seen := make(map[string]bool, len(reader.File))
-	for _, entry := range reader.File {
-		name := entry.Name
-		limit, ok := allowed[name]
-		if !ok || seen[name] || entry.FileInfo().IsDir() || !entry.Mode().IsRegular() {
-			return bundle{}, fmt.Errorf("Xray release archive contains invalid entry %q", name)
-		}
-		seen[name] = true
-		if int64(entry.UncompressedSize64) <= 0 || int64(entry.UncompressedSize64) > limit {
-			return bundle{}, fmt.Errorf("Xray release entry %q has an invalid size", name)
-		}
-		expanded += int64(entry.UncompressedSize64)
-		if expanded > maxExpandedBytes {
-			return bundle{}, errors.New("Xray release archive exceeds the expanded size limit")
-		}
+	for _, entry := range entries {
+		limit := bundleEntryLimit(entry.Name)
 		stream, err := entry.Open()
 		if err != nil {
 			return bundle{}, err
@@ -141,18 +127,63 @@ func extractBundle(archive []byte) (bundle, error) {
 			return bundle{}, closeErr
 		}
 		if int64(len(raw)) != int64(entry.UncompressedSize64) || int64(len(raw)) > limit {
-			return bundle{}, fmt.Errorf("Xray release entry %q exceeds its size limit", name)
+			return bundle{}, fmt.Errorf("Xray release entry %q exceeds its size limit", entry.Name)
 		}
-		if name == "xray" || strings.HasSuffix(name, ".dat") {
-			files[name] = raw
-		}
-	}
-	for _, name := range requiredBundleFiles {
-		if len(files[name]) == 0 {
-			return bundle{}, fmt.Errorf("Xray release archive is missing %s", name)
+		if isRequiredBundleFile(entry.Name) {
+			files[entry.Name] = raw
 		}
 	}
 	return bundle{files: files}, nil
+}
+
+func validateBundleArchive(reader *zip.Reader) ([]*zip.File, error) {
+	if reader == nil {
+		return nil, errors.New("Xray release archive is invalid")
+	}
+	allowed := map[string]int64{
+		"xray": maxBinaryBytes, "geoip.dat": maxAssetBytes, "geosite.dat": maxAssetBytes,
+		"LICENSE": 1 << 20, "README.md": 1 << 20,
+	}
+	var expanded int64
+	seen := make(map[string]bool, len(reader.File))
+	for _, entry := range reader.File {
+		name := entry.Name
+		limit, ok := allowed[name]
+		if !ok || seen[name] || entry.FileInfo().IsDir() || !entry.Mode().IsRegular() {
+			return nil, fmt.Errorf("Xray release archive contains invalid entry %q", name)
+		}
+		seen[name] = true
+		if int64(entry.UncompressedSize64) <= 0 || int64(entry.UncompressedSize64) > limit {
+			return nil, fmt.Errorf("Xray release entry %q has an invalid size", name)
+		}
+		expanded += int64(entry.UncompressedSize64)
+		if expanded > maxExpandedBytes {
+			return nil, errors.New("Xray release archive exceeds the expanded size limit")
+		}
+	}
+	for _, name := range requiredBundleFiles {
+		if !seen[name] {
+			return nil, fmt.Errorf("Xray release archive is missing %s", name)
+		}
+	}
+	return reader.File, nil
+}
+
+func bundleEntryLimit(name string) int64 {
+	switch name {
+	case "xray":
+		return maxBinaryBytes
+	case "geoip.dat", "geosite.dat":
+		return maxAssetBytes
+	case "LICENSE", "README.md":
+		return 1 << 20
+	default:
+		return 0
+	}
+}
+
+func isRequiredBundleFile(name string) bool {
+	return name == "xray" || name == "geoip.dat" || name == "geosite.dat"
 }
 
 func validateVersion(version string) error {

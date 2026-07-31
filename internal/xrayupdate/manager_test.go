@@ -147,6 +147,8 @@ func writeAppliedConfig(t *testing.T, state string) {
 }
 
 func TestManagerDownloadsChecksummedBundleFromPinnedReleaseShape(t *testing.T) {
+	downloadTemp := t.TempDir()
+	t.Setenv("TMPDIR", downloadTemp)
 	arch := runtime.GOARCH
 	if arch == "arm" {
 		arch = "armv7"
@@ -189,6 +191,33 @@ func TestManagerDownloadsChecksummedBundleFromPinnedReleaseShape(t *testing.T) {
 	result, err := manager.Apply(context.Background(), Request{CommandID: "release-command", Version: manifest.Version})
 	if err != nil || !result.Success() || result.Version != manifest.Version {
 		t.Fatalf("Apply result=%+v err=%v", result, err)
+	}
+	entries, err := os.ReadDir(downloadTemp)
+	if err != nil {
+		t.Fatalf("read download temp: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("Xray release temporary files were not cleaned: %v", entries)
+	}
+}
+
+func TestManagerRejectsSymlinkedInstalledBundleFile(t *testing.T) {
+	state := t.TempDir()
+	manager := newTestManager(t, state, &recordingController{directory: Directory(state)}, &recordingRunner{})
+	installVersion(t, manager, "v1.0.0")
+	applied, err := manager.Current()
+	if err != nil {
+		t.Fatalf("Current before corruption: %v", err)
+	}
+	filePath := filepath.Join(manager.directory, applied.Target, "geosite.dat")
+	if err := os.Remove(filePath); err != nil {
+		t.Fatalf("remove installed file: %v", err)
+	}
+	if err := os.Symlink("geoip.dat", filePath); err != nil {
+		t.Fatalf("replace installed file with symlink: %v", err)
+	}
+	if _, err := manager.Current(); err == nil || !strings.Contains(err.Error(), "unsafe permissions or type") {
+		t.Fatalf("Current with symlink error = %v", err)
 	}
 }
 
