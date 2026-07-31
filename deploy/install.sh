@@ -18,6 +18,8 @@ CHECKSUMS_PATH=
 runtime_marker_temporary=
 asset_temporary=
 INSTALL_HEALTH_TIMEOUT=${XUI_AGENT_INSTALL_HEALTH_TIMEOUT:-180}
+INIT_SYSTEM=
+OPENRC_XRAY_ENABLED=false
 
 validate_version() {
     value=$1
@@ -38,6 +40,14 @@ install_root_asset() {
     install -m "$mode" -o root -g root "$source" "$asset_temporary"
     mv -f "$asset_temporary" "$destination"
     asset_temporary=
+}
+
+run_as_agent() {
+    if [ "$INIT_SYSTEM" = systemd ]; then
+        runuser -u xui-agent -- "$@"
+    else
+        su -s /bin/sh xui-agent -c 'exec "$@"' sh "$@"
+    fi
 }
 
 usage() {
@@ -100,13 +110,31 @@ fi
 case "$XRAY_MODE" in
     observe) ;;
     managed)
-		XRAY_BINARY="$STATE_DIRECTORY/xray-runtime/current/xray"
+        XRAY_BINARY="$STATE_DIRECTORY/xray-runtime/current/xray"
         XRAY_CONFIG=
         XRAY_PID_FILE=
         ;;
     *) echo "--xray-mode must be observe or managed" >&2; exit 2 ;;
 esac
-for command in getent groupadd useradd runuser sha256sum systemctl tar; do
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null 2>&1; then
+    INIT_SYSTEM=systemd
+elif [ -d /run/openrc ] && command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then
+    INIT_SYSTEM=openrc
+else
+    echo "unsupported init system: systemd or OpenRC must be running" >&2
+    exit 1
+fi
+
+required_commands="getent install sha256sum tar"
+if [ "$INIT_SYSTEM" = systemd ]; then
+    required_commands="$required_commands groupadd useradd runuser systemctl"
+else
+    required_commands="$required_commands addgroup adduser su rc-service rc-update"
+    if rc-update show default 2>/dev/null | awk '$1 == "xui-agent-xray" { found=1 } END { exit !found }'; then
+        OPENRC_XRAY_ENABLED=true
+    fi
+fi
+for command in $required_commands; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "$command is required" >&2
         exit 1
@@ -159,7 +187,16 @@ if [ "$actual" != "$expected" ]; then
 fi
 
 entries=$(tar -tzf "$temporary/$archive_name" | LC_ALL=C sort)
-expected_entries=$(printf '%s\n' uninstall.sh xui-agent xui-agent-launcher xui-agent.service xui-agent-xray.path xui-agent-xray.service | LC_ALL=C sort)
+expected_entries=$(printf '%s\n' \
+    uninstall.sh \
+    xui-agent \
+    xui-agent-launcher \
+    xui-agent-xray-launcher \
+    xui-agent.openrc \
+    xui-agent-xray.openrc \
+    xui-agent.service \
+    xui-agent-xray.path \
+    xui-agent-xray.service | LC_ALL=C sort)
 if [ "$entries" != "$expected_entries" ]; then
     echo "release archive contains unexpected files" >&2
     exit 1
@@ -182,6 +219,9 @@ runtime_assets_digest=$(
     sha256sum \
         uninstall.sh \
         xui-agent-launcher \
+        xui-agent-xray-launcher \
+        xui-agent.openrc \
+        xui-agent-xray.openrc \
         xui-agent-xray.path \
         xui-agent-xray.service \
         xui-agent.service |
@@ -190,10 +230,18 @@ runtime_assets_digest=$(
 )
 
 if ! getent group xui-agent >/dev/null 2>&1; then
-    groupadd --system xui-agent
+    if [ "$INIT_SYSTEM" = systemd ]; then
+        groupadd --system xui-agent
+    else
+        addgroup -S xui-agent
+    fi
 fi
 if ! id xui-agent >/dev/null 2>&1; then
-    useradd --system --gid xui-agent --home-dir "$STATE_DIRECTORY" --shell /usr/sbin/nologin xui-agent
+    if [ "$INIT_SYSTEM" = systemd ]; then
+        useradd --system --gid xui-agent --home-dir "$STATE_DIRECTORY" --shell /usr/sbin/nologin xui-agent
+    else
+        adduser -S -D -H -h "$STATE_DIRECTORY" -s /sbin/nologin -G xui-agent xui-agent
+    fi
 fi
 install -d -m 0750 -o root -g xui-agent /etc/xui-agent
 install -d -m 0700 -o xui-agent -g xui-agent "$STATE_DIRECTORY"
@@ -221,9 +269,15 @@ elif [ -e "$STATE_DIRECTORY/current" ]; then
 fi
 
 install_root_asset "$temporary/xui-agent-launcher" /usr/local/libexec/xui-agent-launcher 0755
-install_root_asset "$temporary/xui-agent.service" /etc/systemd/system/xui-agent.service 0644
-install_root_asset "$temporary/xui-agent-xray.service" /etc/systemd/system/xui-agent-xray.service 0644
-install_root_asset "$temporary/xui-agent-xray.path" /etc/systemd/system/xui-agent-xray.path 0644
+if [ "$INIT_SYSTEM" = systemd ]; then
+    install_root_asset "$temporary/xui-agent.service" /etc/systemd/system/xui-agent.service 0644
+    install_root_asset "$temporary/xui-agent-xray.service" /etc/systemd/system/xui-agent-xray.service 0644
+    install_root_asset "$temporary/xui-agent-xray.path" /etc/systemd/system/xui-agent-xray.path 0644
+else
+    install_root_asset "$temporary/xui-agent-xray-launcher" /usr/local/libexec/xui-agent-xray-launcher 0755
+    install_root_asset "$temporary/xui-agent.openrc" /etc/init.d/xui-agent 0755
+    install_root_asset "$temporary/xui-agent-xray.openrc" /etc/init.d/xui-agent-xray 0755
+fi
 install_root_asset "$temporary/uninstall.sh" /usr/local/sbin/xui-agent-uninstall 0755
 runtime_marker_temporary="$RUNTIME_ASSETS_PATH.tmp-$$"
 printf '%s\n' "$runtime_assets_digest" > "$runtime_marker_temporary"
@@ -234,9 +288,9 @@ runtime_marker_temporary=
 
 if [ "$existing_install" = false ]; then
     candidate_directory="$STATE_DIRECTORY/versions/$candidate_version-$candidate_digest"
-    runuser -u xui-agent -- install -d -m 0700 "$candidate_directory"
-    runuser -u xui-agent -- install -m 0755 "$temporary/xui-agent" "$candidate_directory/xui-agent"
-    runuser -u xui-agent -- ln -s "$candidate_target" "$STATE_DIRECTORY/current"
+    run_as_agent install -d -m 0700 "$candidate_directory"
+    run_as_agent install -m 0755 "$temporary/xui-agent" "$candidate_directory/xui-agent"
+    run_as_agent ln -s "$candidate_target" "$STATE_DIRECTORY/current"
 fi
 ln -sfn "$STATE_DIRECTORY/current" /usr/local/bin/xui-agent
 
@@ -270,21 +324,39 @@ if [ ! -f "$STATE_DIRECTORY/identity.json" ] && [ -z "${XUI_AGENT_ENROLLMENT_TOK
     exit 2
 fi
 if [ -n "${XUI_AGENT_ENROLLMENT_TOKEN:-}" ]; then
-    runuser -u xui-agent -- env XUI_AGENT_ENROLLMENT_TOKEN="$XUI_AGENT_ENROLLMENT_TOKEN" \
+    run_as_agent env XUI_AGENT_ENROLLMENT_TOKEN="$XUI_AGENT_ENROLLMENT_TOKEN" \
         /usr/local/bin/xui-agent enroll --config "$CONFIG_PATH"
 fi
 
-systemctl daemon-reload
-systemctl enable --now xui-agent-xray.path
-systemctl enable xui-agent.service
+if [ "$INIT_SYSTEM" = systemd ]; then
+    systemctl daemon-reload
+    systemctl enable --now xui-agent-xray.path
+    systemctl enable xui-agent.service
+else
+    rc-update add xui-agent default
+    if [ "$XRAY_MODE" = managed ] || [ "$OPENRC_XRAY_ENABLED" = true ] || rc-service xui-agent-xray status >/dev/null 2>&1; then
+        rc-update add xui-agent-xray default
+        if ! rc-service xui-agent-xray status >/dev/null 2>&1; then
+            rc-service xui-agent-xray start
+        fi
+    fi
+fi
 if [ "$existing_install" = true ]; then
     install_command_id="installer-$candidate_version-$(date +%s)-$$"
-    runuser -u xui-agent -- "$temporary/xui-agent" prepare-update \
+    run_as_agent "$temporary/xui-agent" prepare-update \
         --state-directory "$STATE_DIRECTORY" \
         --command-id "$install_command_id"
 fi
-if ! systemctl restart xui-agent.service; then
-    echo "xui-agent restart did not complete immediately; waiting for rollback state" >&2
+if [ "$INIT_SYSTEM" = systemd ]; then
+    if ! systemctl restart xui-agent.service; then
+        echo "xui-agent restart did not complete immediately; waiting for rollback state" >&2
+    fi
+elif rc-service xui-agent status >/dev/null 2>&1; then
+    if ! rc-service xui-agent restart; then
+        echo "xui-agent restart did not complete immediately; waiting for rollback state" >&2
+    fi
+else
+    rc-service xui-agent start
 fi
 
 if [ "$existing_install" = true ]; then
@@ -306,5 +378,9 @@ if [ "$existing_install" = true ]; then
         exit 1
     fi
 fi
-systemctl --quiet is-active xui-agent.service
+if [ "$INIT_SYSTEM" = systemd ]; then
+    systemctl --quiet is-active xui-agent.service
+else
+    rc-service xui-agent status >/dev/null
+fi
 echo "xui-agent installed and running"

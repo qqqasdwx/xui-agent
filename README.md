@@ -6,7 +6,7 @@
 
 The Agent reports system and Xray status, updates its own binary from the fixed `qqqasdwx/xui-agent` GitHub Release source, and can shadow-validate a complete node configuration received from the central control plane. A shadow validation writes only to the Agent state directory and runs the configured Xray binary with `run -test`; it does not replace the running configuration or start, stop, signal, or restart Xray.
 
-Setting `xray.mode` to `managed` enables the separate configuration-apply capability. Managed mode stores immutable configuration versions under the Agent state directory, atomically switches `current.json` and `previous.json`, and runs Xray in a dedicated systemd service. A candidate is confirmed only after the replacement Xray process remains healthy; startup failure restores the previous version. The default `observe` mode never advertises this capability.
+Setting `xray.mode` to `managed` enables the separate configuration-apply capability. Managed mode stores immutable configuration versions under the Agent state directory, atomically switches `current.json` and `previous.json`, and runs Xray in a dedicated systemd or OpenRC service. A candidate is confirmed only after the replacement Xray process remains healthy; startup failure restores the previous version. The default `observe` mode never advertises this capability.
 
 Managed mode can also install and update a complete Xray bundle from the fixed `qqqasdwx/Xray-core` GitHub Release source. The executable, `geoip.dat`, and `geosite.dat` are pinned and rolled back as one unit. An existing managed installation may keep its configured Xray path as the bootstrap fallback for the first managed bundle; after that bundle is confirmed, the Agent uses only the selected managed runtime. Existing configurations are checked with the candidate before a managed restart; protocol v1 does not claim hot binary replacement. See [Managed Xray Release Contract](docs/managed-xray-release-contract.md) for the capability matrix, activation rules, and rollout order.
 
@@ -16,7 +16,7 @@ Existing node panels, Vector agents, and risk processing remain authoritative un
 
 ## Install
 
-Create an enrollment token for an existing node in the central 3x-ui Nodes page. Run the generated installation command as root on that node. The command downloads a release archive, verifies its SHA-256, creates the dedicated `xui-agent` user, enrolls once, and starts the systemd service.
+Create an enrollment token for an existing node in the central 3x-ui Nodes page. Run the generated installation command as root on that node. The command downloads a release archive, verifies its SHA-256, creates the dedicated `xui-agent` user, enrolls once, detects a running systemd or OpenRC init system, and installs only the matching service assets. Other init systems fail explicitly.
 
 The equivalent command shape is:
 
@@ -50,13 +50,14 @@ Installations at `v0.3.3` or earlier must run the new Release installer once bec
 - `/var/lib/xui-agent/xray-runtime/applied.json`: confirmed managed Xray bundle state
 - `/var/lib/xui-agent/current`: atomically selected Agent binary
 - `/var/lib/xui-agent/previous`: rollback target
-- `/usr/local/libexec/xui-agent-launcher`: stable systemd launcher
+- `/usr/local/libexec/xui-agent-launcher`: stable Agent launcher shared by systemd and OpenRC
+- `/usr/local/libexec/xui-agent-xray-launcher`: OpenRC adapter that waits for the first managed configuration
 
 The launcher rolls back a pending release when the new binary exits before completing an authenticated heartbeat. A successful first heartbeat removes the pending marker and confirms the update.
 
-Binary updates also compare the release manifest's runtime-assets digest with the root-owned marker written by the installer. If a release changes the launcher, systemd units, or uninstall script, the Agent rejects binary-only activation and reports that the release installer must run first. The unprivileged Agent never writes root-owned runtime assets.
+Binary updates also compare the release manifest's runtime-assets digest with the root-owned marker written by the installer. If a release changes a launcher, systemd unit, OpenRC service, or the uninstall script, the Agent rejects binary-only activation and reports that the release installer must run first. The unprivileged Agent never writes root-owned runtime assets.
 
-Runtime assets in a release must remain compatible with the immediately previous supported Agent binary because a failed candidate is rolled back under the newly installed launcher and systemd units. A breaking runtime-asset change requires a staged compatibility release before the incompatible assets can ship.
+Runtime assets in a release must remain compatible with the immediately previous supported Agent binary because a failed candidate is rolled back under the newly installed launcher and init assets. A breaking runtime-asset change requires a staged compatibility release before the incompatible assets can ship.
 
 ## Commands
 
@@ -85,7 +86,7 @@ Revoke the node credential in the center before permanent removal.
 
 ## Releases
 
-Release tags build a deterministic Linux `amd64` archive. Manifest schema 3 binds the archive's size and SHA-256 plus its runtime-assets digest. The Agent constructs manifest and archive URLs itself from the fixed repository; the center can select only `latest` or a validated Release tag. The workflow requires no release-signing Secret and refuses to overwrite existing release assets. ARM nodes are not supported.
+Release tags build one deterministic Linux `amd64` archive for both Debian/systemd and Alpine/OpenRC. Manifest schema 3 binds the archive's size and SHA-256 plus the digest of both init adapters. The Agent constructs manifest and archive URLs itself from the fixed repository; the center can select only `latest` or a validated Release tag. The workflow requires no release-signing Secret and refuses to overwrite existing release assets. ARM nodes are not supported.
 
 Local checks:
 

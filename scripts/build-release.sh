@@ -8,7 +8,7 @@ fi
 
 VERSION=$1
 OUTPUT_DIRECTORY=${2:-dist}
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 case "$OUTPUT_DIRECTORY" in
     /*) ;;
@@ -46,13 +46,18 @@ build_archive() {
     install -m 0644 "$ROOT/deploy/xui-agent.service" "$staging/xui-agent.service"
     install -m 0644 "$ROOT/deploy/xui-agent-xray.service" "$staging/xui-agent-xray.service"
     install -m 0644 "$ROOT/deploy/xui-agent-xray.path" "$staging/xui-agent-xray.path"
+    install -m 0755 "$ROOT/deploy/xui-agent.openrc" "$staging/xui-agent.openrc"
+    install -m 0755 "$ROOT/deploy/xui-agent-xray.openrc" "$staging/xui-agent-xray.openrc"
     install -m 0755 "$ROOT/deploy/xui-agent-launcher" "$staging/xui-agent-launcher"
+    install -m 0755 "$ROOT/deploy/xui-agent-xray-launcher" "$staging/xui-agent-xray-launcher"
     install -m 0755 "$ROOT/deploy/uninstall.sh" "$staging/uninstall.sh"
 
     archive="xui-agent-linux-$suffix.tar.gz"
     tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" \
         -C "$staging" -czf "$OUTPUT_DIRECTORY/$archive" \
-        xui-agent xui-agent-launcher xui-agent.service xui-agent-xray.service xui-agent-xray.path uninstall.sh
+        xui-agent xui-agent-launcher xui-agent-xray-launcher \
+        xui-agent.openrc xui-agent-xray.openrc \
+        xui-agent.service xui-agent-xray.service xui-agent-xray.path uninstall.sh
     rm -rf "$staging"
     trap - EXIT HUP INT TERM
 }

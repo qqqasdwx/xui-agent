@@ -38,6 +38,8 @@ The manifest `version` is the unique Fork Release tag, for example `v26.7.28-xui
 
 The Agent installs the executable and both geodata files as one immutable bundle under `xray-runtime/versions`. It never combines an executable from one release with geodata from another release.
 
+Debian/systemd and Alpine/OpenRC use the same static Agent and Xray bundles. Init assets only adapt service startup and supervision: both paths invoke the same `xray-run` command, PID validation, restart marker, health deadline, activation, and rollback state machine. The OpenRC service runs as `xui-agent` under `supervise-daemon`; only that Xray service receives ambient `CAP_NET_BIND_SERVICE`.
+
 ## Activation
 
 Hot replacement is not part of protocol v1.

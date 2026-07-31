@@ -54,14 +54,21 @@ func TestCreateManifestWritesChecksummedMetadata(t *testing.T) {
 func releaseArchive(t *testing.T, arch string) []byte {
 	t.Helper()
 	entries := map[string][]byte{
-		"xui-agent":              []byte("binary-" + arch),
-		"uninstall.sh":           []byte("uninstall\n"),
-		"xui-agent-launcher":     []byte("launcher\n"),
-		"xui-agent-xray.path":    []byte("path\n"),
-		"xui-agent-xray.service": []byte("xray service\n"),
-		"xui-agent.service":      []byte("agent service\n"),
+		"xui-agent":               []byte("binary-" + arch),
+		"uninstall.sh":            []byte("uninstall\n"),
+		"xui-agent-launcher":      []byte("launcher\n"),
+		"xui-agent-xray-launcher": []byte("xray launcher\n"),
+		"xui-agent.openrc":        []byte("agent openrc\n"),
+		"xui-agent-xray.openrc":   []byte("xray openrc\n"),
+		"xui-agent-xray.path":     []byte("path\n"),
+		"xui-agent-xray.service":  []byte("xray service\n"),
+		"xui-agent.service":       []byte("agent service\n"),
 	}
-	order := []string{"xui-agent", "uninstall.sh", "xui-agent-launcher", "xui-agent-xray.path", "xui-agent-xray.service", "xui-agent.service"}
+	order := []string{
+		"xui-agent", "uninstall.sh", "xui-agent-launcher", "xui-agent-xray-launcher",
+		"xui-agent.openrc", "xui-agent-xray.openrc", "xui-agent-xray.path",
+		"xui-agent-xray.service", "xui-agent.service",
+	}
 	var output bytes.Buffer
 	gz := gzip.NewWriter(&output)
 	tw := tar.NewWriter(gz)

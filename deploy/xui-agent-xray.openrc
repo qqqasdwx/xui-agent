@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# shellcheck disable=SC2034 # openrc-run consumes these service variables.
+
+name="xui-stack managed Xray runtime"
+description="xui-stack managed Xray runtime"
+command="/usr/local/libexec/xui-agent-xray-launcher"
+command_user="xui-agent:xui-agent"
+supervisor="supervise-daemon"
+respawn_delay=1
+respawn_max=0
+umask=0077
+no_new_privs=true
+capabilities="^cap_net_bind_service"
+output_logger="logger -t xui-agent-xray"
+error_logger="logger -t xui-agent-xray"
+
+depend() {
+	need net
+	after firewall
+}

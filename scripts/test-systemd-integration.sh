@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 BUILD_DIRECTORY=
 TEST_USER_CREATED=false
 TEST_GROUP_CREATED=false
@@ -74,6 +74,11 @@ GOMAXPROCS=${GOMAXPROCS:-2} go test -p=1 -tags=integration -c -o "$BUILD_DIRECTO
 install -m 0755 "$BUILD_DIRECTORY/xui-agent" /usr/local/bin/xui-agent
 install -m 0755 "$BUILD_DIRECTORY/fake-xray" /usr/local/libexec/xui-agent-test-xray
 install -m 0755 "$BUILD_DIRECTORY/runtime-integration.test" /usr/local/libexec/xui-agent-runtime-integration.test
+install -d -m 0700 -o xui-agent -g xui-agent /var/lib/xui-agent/xray-runtime
+install -d -m 0700 -o xui-agent -g xui-agent /var/lib/xui-agent/xray-runtime/versions
+install -d -m 0700 -o xui-agent -g xui-agent /var/lib/xui-agent/xray-runtime/versions/integration
+install -m 0755 -o xui-agent -g xui-agent "$BUILD_DIRECTORY/fake-xray" /var/lib/xui-agent/xray-runtime/versions/integration/xray
+runuser -u xui-agent -- ln -s versions/integration /var/lib/xui-agent/xray-runtime/current
 install -m 0644 "$ROOT/deploy/xui-agent-xray.service" /run/systemd/system/xui-agent-xray.service
 install -m 0644 "$ROOT/deploy/xui-agent-xray.path" /run/systemd/system/xui-agent-xray.path
 

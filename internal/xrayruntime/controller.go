@@ -50,7 +50,7 @@ func (c *ProcessController) RestartAndWait(ctx context.Context) error {
 		return err
 	}
 	if err := writeAtomic(RestartPath(c.stateDirectory), []byte(strconv.FormatInt(time.Now().UnixNano(), 10)+"\n"), configFileMode); err != nil {
-		return fmt.Errorf("notify Xray systemd path unit: %w", err)
+		return fmt.Errorf("notify Xray supervisor: %w", err)
 	}
 	if oldPID > 0 {
 		if err := signalProcess(oldPID, syscall.SIGTERM); err != nil {

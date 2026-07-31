@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# shellcheck disable=SC2034 # openrc-run consumes these service variables.
+
+name="xui-stack node agent"
+description="xui-stack node agent"
+command="/usr/local/libexec/xui-agent-launcher"
+command_user="xui-agent:xui-agent"
+supervisor="supervise-daemon"
+respawn_delay=5
+respawn_max=0
+umask=0077
+no_new_privs=true
+output_logger="logger -t xui-agent"
+error_logger="logger -t xui-agent"
+
+depend() {
+	need net
+	after firewall
+}

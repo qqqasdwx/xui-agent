@@ -1,0 +1,12 @@
+#!/bin/sh
+set -u
+
+STATE_DIRECTORY=${XUI_AGENT_STATE_DIRECTORY:-/var/lib/xui-agent}
+CONFIG_PATH=${XUI_AGENT_CONFIG_PATH:-/etc/xui-agent/config.json}
+CURRENT_CONFIG="$STATE_DIRECTORY/xray-config/current.json"
+
+while [ ! -f "$CURRENT_CONFIG" ]; do
+    sleep 1
+done
+
+exec /usr/local/bin/xui-agent xray-run -config "$CONFIG_PATH"

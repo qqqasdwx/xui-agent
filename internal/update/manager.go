@@ -39,6 +39,9 @@ const (
 var runtimeAssetNames = []string{
 	"uninstall.sh",
 	"xui-agent-launcher",
+	"xui-agent-xray-launcher",
+	"xui-agent.openrc",
+	"xui-agent-xray.openrc",
 	"xui-agent-xray.path",
 	"xui-agent-xray.service",
 	"xui-agent.service",
