@@ -3,9 +3,14 @@ package release
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -111,6 +116,125 @@ func TestDownloadToStreamsAndEnforcesLimit(t *testing.T) {
 	}
 }
 
+func TestDownloadRetriesTransientRequestFailure(t *testing.T) {
+	client, err := NewClient("https://github.com", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.retryDelay = func(int) time.Duration { return 0 }
+	attempts := 0
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("artifact")),
+			Request:    request,
+		}, nil
+	})
+
+	raw, err := client.Download(context.Background(), "https://github.com/release", 64)
+	if err != nil || string(raw) != "artifact" || attempts != 2 {
+		t.Fatalf("Download attempts=%d raw=%q err=%v", attempts, raw, err)
+	}
+}
+
+func TestDownloadRetriesTransientHTTPStatus(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempts++
+		if attempts == 1 {
+			http.Error(response, "temporary", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = response.Write([]byte("artifact"))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.retryDelay = func(int) time.Duration { return 0 }
+	raw, err := client.Download(context.Background(), server.URL+"/release", 64)
+	if err != nil || string(raw) != "artifact" || attempts != 2 {
+		t.Fatalf("Download attempts=%d raw=%q err=%v", attempts, raw, err)
+	}
+}
+
+func TestDownloadRetriesPartialInMemoryResponse(t *testing.T) {
+	client, err := NewClient("https://github.com", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.retryDelay = func(int) time.Duration { return 0 }
+	attempts := 0
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts++
+		body := io.Reader(strings.NewReader("artifact"))
+		if attempts == 1 {
+			body = io.MultiReader(strings.NewReader("partial"), unexpectedEOFReader{})
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(body),
+			Request:    request,
+		}, nil
+	})
+
+	raw, err := client.Download(context.Background(), "https://github.com/release", 64)
+	if err != nil || string(raw) != "artifact" || attempts != 2 {
+		t.Fatalf("Download attempts=%d raw=%q err=%v", attempts, raw, err)
+	}
+}
+
+func TestDownloadDoesNotRetryPermanentHTTPStatus(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		attempts++
+		http.Error(response, "missing", http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, true)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.retryDelay = func(int) time.Duration { return 0 }
+	_, err = client.Download(context.Background(), server.URL+"/release", 64)
+	if err == nil || attempts != 1 {
+		t.Fatalf("Download attempts=%d err=%v", attempts, err)
+	}
+}
+
+func TestDownloadDoesNotRetryAfterWritingResponseBody(t *testing.T) {
+	client, err := NewClient("https://github.com", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.retryDelay = func(int) time.Duration { return 0 }
+	attempts := 0
+	client.httpClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(io.MultiReader(strings.NewReader("partial"), unexpectedEOFReader{})),
+			Request:    request,
+		}, nil
+	})
+
+	var output bytes.Buffer
+	written, err := client.DownloadTo(context.Background(), "https://github.com/release", 64, &output)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || attempts != 1 || written != int64(len("partial")) || output.String() != "partial" {
+		t.Fatalf("DownloadTo attempts=%d written=%d output=%q err=%v", attempts, written, output.String(), err)
+	}
+}
+
 func TestDownloadRejectsQueryInInitialURL(t *testing.T) {
 	client, err := NewClient("http://example.test", true)
 	if err != nil {
@@ -122,7 +246,9 @@ func TestDownloadRejectsQueryInInitialURL(t *testing.T) {
 }
 
 func TestDownloadRejectsRedirectCredentials(t *testing.T) {
+	attempts := 0
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		attempts++
 		response.Header().Set("Location", fmt.Sprintf("http://user:password@%s/asset", request.Host))
 		response.WriteHeader(http.StatusFound)
 	}))
@@ -135,4 +261,19 @@ func TestDownloadRejectsRedirectCredentials(t *testing.T) {
 	if _, err := client.Download(context.Background(), server.URL, 64); err == nil {
 		t.Fatal("release redirect with credentials was accepted")
 	}
+	if attempts != 1 {
+		t.Fatalf("unsafe redirect was retried %d times", attempts)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+type unexpectedEOFReader struct{}
+
+func (unexpectedEOFReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
 }

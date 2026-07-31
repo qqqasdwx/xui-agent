@@ -6,18 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
 )
 
-const downloadTimeout = 10 * time.Minute
+const (
+	downloadTimeout       = 10 * time.Minute
+	maxDownloadAttempts   = 3
+	initialRetryDelay     = time.Second
+	maxRetryResponseBytes = 4 << 10
+)
 
 type Client struct {
 	allowInsecure bool
 	httpClient    *http.Client
 	baseURL       string
+	retryDelay    func(int) time.Duration
 }
 
 func NewClient(baseURL string, allowInsecure bool) (*Client, error) {
@@ -25,7 +32,11 @@ func NewClient(baseURL string, allowInsecure bool) (*Client, error) {
 	if err != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("release base URL is invalid")
 	}
-	client := &Client{allowInsecure: allowInsecure, baseURL: strings.TrimSuffix(baseURL, "/")}
+	client := &Client{
+		allowInsecure: allowInsecure,
+		baseURL:       strings.TrimSuffix(baseURL, "/"),
+		retryDelay:    downloadRetryDelay,
+	}
 	if err := client.validateRedirectURL(parsed); err != nil {
 		return nil, err
 	}
@@ -53,13 +64,21 @@ func (c *Client) URL(repository, version, asset string) (string, error) {
 
 func (c *Client) Download(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
 	var output bytes.Buffer
-	if _, err := c.DownloadTo(ctx, rawURL, limit, &output); err != nil {
+	_, err := c.downloadWithRetry(ctx, rawURL, limit, func() io.Writer {
+		output.Reset()
+		return &output
+	}, true)
+	if err != nil {
 		return nil, err
 	}
 	return output.Bytes(), nil
 }
 
 func (c *Client) DownloadTo(ctx context.Context, rawURL string, limit int64, destination io.Writer) (int64, error) {
+	return c.downloadWithRetry(ctx, rawURL, limit, func() io.Writer { return destination }, false)
+}
+
+func (c *Client) downloadWithRetry(ctx context.Context, rawURL string, limit int64, destination func() io.Writer, retryAfterWrite bool) (int64, error) {
 	if c == nil || limit <= 0 || destination == nil {
 		return 0, errors.New("release download is not configured")
 	}
@@ -67,26 +86,90 @@ func (c *Client) DownloadTo(ctx context.Context, rawURL string, limit int64, des
 	if err != nil || c.validateInitialURL(u) != nil {
 		return 0, errors.New("release URL must be absolute HTTPS without credentials, query, or fragment")
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	downloadCtx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
+	for attempt := 0; attempt < maxDownloadAttempts; attempt++ {
+		written, retryable, err := c.downloadAttempt(downloadCtx, u.String(), limit, destination())
+		if err == nil {
+			return written, nil
+		}
+		if attempt+1 == maxDownloadAttempts || !retryable || (written > 0 && !retryAfterWrite) {
+			return written, err
+		}
+		if err := c.waitBeforeRetry(downloadCtx, attempt); err != nil {
+			return written, err
+		}
+	}
+	return 0, errors.New("release download attempts exhausted")
+}
+
+func (c *Client) downloadAttempt(ctx context.Context, rawURL string, limit int64, destination io.Writer) (int64, bool, error) {
+	if destination == nil {
+		return 0, false, errors.New("release download is not configured")
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return 0, err
+		return 0, false, err
 	}
 	response, err := c.httpClient.Do(request)
 	if err != nil {
-		return 0, err
+		return 0, retryableRequestError(err), err
 	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("HTTP %d", response.StatusCode)
+		retryable := retryableStatus(response.StatusCode)
+		if retryable {
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxRetryResponseBytes))
+		}
+		_ = response.Body.Close()
+		return 0, retryable, fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	written, err := io.Copy(destination, io.LimitReader(response.Body, limit+1))
+	_ = response.Body.Close()
 	if err != nil {
-		return written, err
+		return written, retryableRequestError(err), err
 	}
 	if written > limit {
-		return written, errors.New("release download exceeds the size limit")
+		return written, false, errors.New("release download exceeds the size limit")
 	}
-	return written, nil
+	return written, false, nil
+}
+
+func retryableRequestError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var requestError *url.Error
+	if errors.As(err, &requestError) {
+		err = requestError.Err
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError)
+}
+
+func retryableStatus(status int) bool {
+	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || (status >= 500 && status <= 599)
+}
+
+func downloadRetryDelay(attempt int) time.Duration {
+	return initialRetryDelay << attempt
+}
+
+func (c *Client) waitBeforeRetry(ctx context.Context, attempt int) error {
+	delay := downloadRetryDelay(attempt)
+	if c.retryDelay != nil {
+		delay = c.retryDelay(attempt)
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c *Client) validateInitialURL(u *url.URL) error {
