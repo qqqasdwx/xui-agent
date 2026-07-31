@@ -2,7 +2,7 @@
 
 ## Project Role
 
-This repository contains the lightweight node agent for xui-stack. The agent runs under systemd, maintains an outbound authenticated connection to the central 3x-ui control plane, reconciles approved configuration, supervises the local Xray process, and delivers node events reliably.
+This repository contains the lightweight node agent for xui-stack. The agent runs as a native service under systemd on Debian or OpenRC on Alpine LXC, maintains an outbound authenticated connection to the central 3x-ui control plane, reconciles approved configuration, supervises the local Xray process, and delivers node events reliably.
 
 The sibling repositories are:
 
@@ -16,6 +16,7 @@ The sibling repositories are:
 - The agent validates configuration before activation and preserves the last known good configuration for offline operation and rollback.
 - The agent may supervise only explicitly supported Xray lifecycle operations. Do not expose arbitrary shell execution.
 - Do not require a local 3x-ui panel, Docker daemon, Docker socket, or inbound public management API.
+- Publish one static `linux/amd64` binary for Debian and Alpine. Keep systemd and OpenRC as init adapters around the same Agent and Xray lifecycle state machines; do not fork runtime behavior by distribution.
 - Keep access events and routing events as separate ordered streams. Do not invent a one-to-one correlation contract between them.
 - Risk evaluation, alerting policy, fleet views, and user administration belong in the central control plane, not in the agent.
 - Connection-time enforcement belongs in Xray-core when accurate enforcement requires live protocol state.
@@ -53,6 +54,6 @@ Run the checks relevant to the change, including:
 - `go vet ./...`
 - `go test -race ./...` for concurrency or lifecycle changes
 - protocol compatibility tests for control-plane contract changes
-- systemd and isolated Xray integration tests for lifecycle or update changes
+- systemd, OpenRC, and isolated Xray integration tests for lifecycle or update changes
 
 Report checks that could not be run and why.
