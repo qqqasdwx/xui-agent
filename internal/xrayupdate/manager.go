@@ -127,7 +127,7 @@ func (ExecRunner) ValidateVersion(ctx context.Context, binaryPath, version strin
 		if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
 			return errors.New("Xray version check timed out")
 		}
-		return fmt.Errorf("run Xray version check: %s", cleanError(output.String(), err))
+		return fmt.Errorf("run Xray version check: %s", cleanError("", err))
 	}
 	fields := strings.Fields(output.String())
 	if len(fields) < 2 || fields[0] != "Xray" || strings.TrimPrefix(fields[1], "v") != strings.TrimPrefix(version, "v") {
@@ -149,7 +149,7 @@ func (ExecRunner) ValidateConfig(ctx context.Context, binaryPath, configPath str
 		if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
 			return errors.New("Xray candidate config validation timed out")
 		}
-		return fmt.Errorf("validate current config with Xray candidate: %s", cleanError(output.String(), err))
+		return fmt.Errorf("validate current config with Xray candidate: %s", cleanError("", err))
 	}
 	return nil
 }
@@ -160,6 +160,7 @@ type Manager struct {
 	releases       *signedrelease.Client
 	controller     Controller
 	runner         Runner
+	writeState     func(string, any, os.FileMode) error
 	mu             sync.Mutex
 }
 
@@ -312,7 +313,7 @@ func (m *Manager) install(ctx context.Context, commandID, version, xrayVersion, 
 		CommandID: commandID, PreviousTarget: previousTarget, PreviousApplied: previousApplied, Target: target,
 		Version: version, XrayVersion: xrayVersion, ArchiveDigest: archiveDigest, StartedAt: time.Now().Unix(),
 	}
-	if err := writeJSONAtomic(m.pendingPath(), pending, stateFileMode); err != nil {
+	if err := m.persistState(m.pendingPath(), pending, stateFileMode); err != nil {
 		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("persist pending Xray binary update: %w", err))
 	}
 	if hasConfig {
@@ -334,7 +335,7 @@ func (m *Manager) install(ctx context.Context, commandID, version, xrayVersion, 
 		}
 	}
 	next := &AppliedState{Version: version, XrayVersion: xrayVersion, ArchiveDigest: archiveDigest, Target: target, AppliedAt: time.Now().Unix()}
-	if err := writeJSONAtomic(m.appliedPath(), next, stateFileMode); err != nil {
+	if err := m.persistState(m.appliedPath(), next, stateFileMode); err != nil {
 		return m.rollbackResult(ctx, pending, configPath, cleanError("persist applied Xray binary", err), ErrorCodePersistenceFailed)
 	}
 	if err := removeAndSync(m.pendingPath()); err != nil {
@@ -380,7 +381,7 @@ func (m *Manager) Recover(ctx context.Context) error {
 	}
 	if err := m.rollback(ctx, *pending, configPath, "unconfirmed Xray binary update was rolled back after agent restart", ErrorCodePreparationFailed); err != nil {
 		combined := cleanError("recover Xray binary update", err)
-		_ = writeJSONAtomic(m.failedPath(), Result{
+		_ = m.persistState(m.failedPath(), Result{
 			Version: pending.Version, Status: StatusInstallFailed, Error: combined,
 			ErrorCode: ErrorCodePreparationFailed, RecoveryStatus: RecoveryStatusFailed,
 		}, stateFileMode)
@@ -396,7 +397,7 @@ func (m *Manager) rollbackResult(ctx context.Context, pending pendingState, conf
 			Version: pending.Version, Status: StatusInstallFailed, Error: combined,
 			ErrorCode: errorCode, RecoveryStatus: RecoveryStatusFailed,
 		}
-		_ = writeJSONAtomic(m.failedPath(), failed, stateFileMode)
+		_ = m.persistState(m.failedPath(), failed, stateFileMode)
 		return Result{}, newUpdateError(ErrorCodeRecoveryFailed, RecoveryStatusFailed, errors.New(combined))
 	}
 	return Result{
@@ -426,12 +427,15 @@ func (m *Manager) rollback(ctx context.Context, pending pendingState, configPath
 	} else {
 		previousApplied, err := m.rollbackAppliedState(pending)
 		if err != nil {
+			if deselectErr := removeAndSync(m.currentPath()); deselectErr != nil {
+				return fmt.Errorf("verify previous Xray binary: %w; deselect failed candidate: %v", err, deselectErr)
+			}
 			return fmt.Errorf("verify previous Xray binary: %w", err)
 		}
 		if err := atomicSymlink(pending.PreviousTarget, m.currentPath()); err != nil {
 			return fmt.Errorf("restore previous Xray binary: %w", err)
 		}
-		if err := writeJSONAtomic(m.appliedPath(), previousApplied, stateFileMode); err != nil {
+		if err := m.persistState(m.appliedPath(), previousApplied, stateFileMode); err != nil {
 			return fmt.Errorf("restore previous Xray binary state: %w", err)
 		}
 	}
@@ -447,7 +451,7 @@ func (m *Manager) rollback(ctx context.Context, pending pendingState, configPath
 		Version: pending.Version, Status: StatusInstallFailed, Error: failure,
 		ErrorCode: errorCode, RecoveryStatus: RecoveryStatusRolledBack, RolledBack: true,
 	}
-	if err := writeJSONAtomic(m.failedPath(), failed, stateFileMode); err != nil {
+	if err := m.persistState(m.failedPath(), failed, stateFileMode); err != nil {
 		return err
 	}
 	return removeAndSync(m.pendingPath())
@@ -893,6 +897,13 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 		return err
 	}
 	return writeAtomic(path, append(raw, '\n'), mode)
+}
+
+func (m *Manager) persistState(path string, value any, mode os.FileMode) error {
+	if m.writeState != nil {
+		return m.writeState(path, value, mode)
+	}
+	return writeJSONAtomic(path, value, mode)
 }
 
 func writeAtomic(path string, content []byte, mode os.FileMode) error {

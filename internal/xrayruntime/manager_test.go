@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
@@ -489,6 +490,53 @@ func TestManagerRejectsMissingRollbackTargetBeforeSwitch(t *testing.T) {
 	}
 	if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("pending state was created: %v", err)
+	}
+}
+
+func TestManagerReportsStorageFailureBeforeConfigSwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "disk full", err: syscall.ENOSPC},
+		{name: "read only filesystem", err: syscall.EROFS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := t.TempDir()
+			controller := &recordingController{directory: Directory(state)}
+			validator := xrayconfig.NewManager(state, "/opt/xray", acceptingRunner{})
+			manager := NewManager(state, validator, controller)
+			if result, err := manager.Apply(context.Background(), runtimeRequest(1, `{"version":1}`)); err != nil || !result.Success() {
+				t.Fatalf("apply first result=%+v err=%v", result, err)
+			}
+			first, err := manager.Current()
+			if err != nil {
+				t.Fatalf("load first state: %v", err)
+			}
+			initialRestarts := controller.restarts
+			manager.writeState = func(path string, value any, mode os.FileMode) error {
+				if path == manager.pendingPath() {
+					return tc.err
+				}
+				return writeJSONAtomic(path, value, mode)
+			}
+
+			if _, err := manager.Apply(context.Background(), runtimeRequest(2, `{"version":2}`)); err == nil || !errors.Is(err, tc.err) {
+				t.Fatalf("storage failure = %v, want %v", err, tc.err)
+			} else if code, recovery := ErrorDetails(err); code != ErrorCodePreparationFailed || recovery != RecoveryStatusNotRequired {
+				t.Fatalf("storage failure details=(%q,%q)", code, recovery)
+			}
+			current, err := manager.Current()
+			if err != nil || current.ConfigVersion != first.ConfigVersion || current.Target != first.Target {
+				t.Fatalf("current=%+v err=%v, want unchanged %+v", current, err, first)
+			}
+			if controller.restarts != initialRestarts {
+				t.Fatalf("restarts=%d, want unchanged %d", controller.restarts, initialRestarts)
+			}
+			if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pending state exists after failed persistence: %v", err)
+			}
+		})
 	}
 }
 

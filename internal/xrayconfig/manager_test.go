@@ -165,3 +165,24 @@ func TestExecRunnerInvokesXrayConfigTest(t *testing.T) {
 		t.Fatalf("ExecRunner.Validate: %v", err)
 	}
 }
+
+func TestExecRunnerDoesNotExposeXrayOutput(t *testing.T) {
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "xray")
+	secret := "client-credential-must-not-leak"
+	script := "#!/bin/sh\necho '" + secret + "' >&2\nexit 23\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake xray: %v", err)
+	}
+	configPath := filepath.Join(directory, "candidate.json")
+	if err := os.WriteFile(configPath, []byte(`{"inbounds":[]}`), 0o600); err != nil {
+		t.Fatalf("write candidate: %v", err)
+	}
+	err := (ExecRunner{}).Validate(context.Background(), binary, configPath)
+	if err == nil || !strings.Contains(err.Error(), "exit status 23") {
+		t.Fatalf("validation error = %v", err)
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("validation error exposed Xray output: %v", err)
+	}
+}

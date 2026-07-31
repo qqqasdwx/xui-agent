@@ -22,7 +22,6 @@ import (
 const (
 	MaxConfigBytes    = 4 << 20
 	validationTimeout = 15 * time.Second
-	maxOutputBytes    = 32 << 10
 	maxErrorBytes     = 2048
 	StatusValidated   = "validated"
 	StatusFailed      = "validation_failed"
@@ -62,11 +61,8 @@ func (r ExecRunner) Validate(ctx context.Context, binaryPath, configPath string)
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	output := &limitedBuffer{limit: maxOutputBytes}
 	command := exec.CommandContext(checkCtx, binaryPath, "run", "-test", "-config", configPath)
 	command.Dir = filepath.Dir(binaryPath)
-	command.Stdout = output
-	command.Stderr = output
 	err := command.Run()
 	if errors.Is(checkCtx.Err(), context.DeadlineExceeded) {
 		return errors.New("xray config validation timed out")
@@ -74,11 +70,7 @@ func (r ExecRunner) Validate(ctx context.Context, binaryPath, configPath string)
 	if err == nil {
 		return nil
 	}
-	message := strings.TrimSpace(output.String())
-	if message == "" {
-		message = err.Error()
-	}
-	return fmt.Errorf("xray config validation failed: %s", cleanError(message))
+	return fmt.Errorf("xray config validation failed: %s", cleanError(err.Error()))
 }
 
 type Manager struct {
@@ -263,25 +255,4 @@ func cleanError(message string) string {
 		message = message[:maxErrorBytes]
 	}
 	return message
-}
-
-type limitedBuffer struct {
-	buffer bytes.Buffer
-	limit  int
-}
-
-func (b *limitedBuffer) Write(content []byte) (int, error) {
-	originalLength := len(content)
-	remaining := b.limit - b.buffer.Len()
-	if remaining > 0 {
-		if len(content) > remaining {
-			content = content[:remaining]
-		}
-		_, _ = b.buffer.Write(content)
-	}
-	return originalLength, nil
-}
-
-func (b *limitedBuffer) String() string {
-	return b.buffer.String()
 }

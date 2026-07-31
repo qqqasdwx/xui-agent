@@ -102,6 +102,7 @@ type Manager struct {
 	directory  string
 	validator  *xrayconfig.Manager
 	controller Controller
+	writeState func(string, any, os.FileMode) error
 	mu         sync.Mutex
 }
 
@@ -246,7 +247,7 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 		ConfigDigest:    request.ConfigDigest,
 		StartedAt:       time.Now().Unix(),
 	}
-	if err := writeJSONAtomic(m.pendingPath(), pending, configFileMode); err != nil {
+	if err := m.persistState(m.pendingPath(), pending, configFileMode); err != nil {
 		return Result{}, newApplyError(ErrorCodePreparationFailed, RecoveryStatusNotRequired,
 			fmt.Errorf("persist pending Xray config: %w", err))
 	}
@@ -281,7 +282,7 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 		Target:        target,
 		AppliedAt:     time.Now().Unix(),
 	}
-	if err := writeJSONAtomic(m.appliedPath(), next, configFileMode); err != nil {
+	if err := m.persistState(m.appliedPath(), next, configFileMode); err != nil {
 		failure := cleanError(fmt.Sprintf("persist applied Xray config: %v", err))
 		return m.rollbackResult(ctx, pending, failure, ErrorCodePersistenceFailed)
 	}
@@ -380,7 +381,7 @@ func (m *Manager) rollback(ctx context.Context, pending pendingState, failure, e
 		if err := atomicSymlink(pending.PreviousTarget, m.currentPath()); err != nil {
 			return fmt.Errorf("restore previous Xray config: %w", err)
 		}
-		if err := writeJSONAtomic(m.appliedPath(), previousApplied, configFileMode); err != nil {
+		if err := m.persistState(m.appliedPath(), previousApplied, configFileMode); err != nil {
 			return fmt.Errorf("restore previous Xray config state: %w", err)
 		}
 		if err := syncDirectory(m.directory); err != nil {
@@ -399,7 +400,7 @@ func (m *Manager) rollback(ctx context.Context, pending pendingState, failure, e
 		RecoveryStatus: RecoveryStatusRolledBack,
 		RolledBack:     true,
 	}
-	if err := writeJSONAtomic(m.failedPath(), failed, configFileMode); err != nil {
+	if err := m.persistState(m.failedPath(), failed, configFileMode); err != nil {
 		return err
 	}
 	return removeAndSync(m.pendingPath())
@@ -413,7 +414,7 @@ func (m *Manager) rollbackResult(ctx context.Context, pending pendingState, fail
 			Status: StatusApplyFailed, Error: combined, ErrorCode: errorCode,
 			RecoveryStatus: RecoveryStatusFailed,
 		}
-		if persistErr := writeJSONAtomic(m.failedPath(), failed, configFileMode); persistErr != nil {
+		if persistErr := m.persistState(m.failedPath(), failed, configFileMode); persistErr != nil {
 			combined = cleanError(fmt.Sprintf("%s; persist recovery failure: %v", combined, persistErr))
 		}
 		return Result{}, newApplyError(ErrorCodeRecoveryFailed, RecoveryStatusFailed, errors.New(combined))
@@ -803,6 +804,13 @@ func writeJSONAtomic(path string, value any, mode os.FileMode) error {
 		return err
 	}
 	return writeAtomic(path, append(raw, '\n'), mode)
+}
+
+func (m *Manager) persistState(path string, value any, mode os.FileMode) error {
+	if m.writeState != nil {
+		return m.writeState(path, value, mode)
+	}
+	return writeJSONAtomic(path, value, mode)
 }
 
 func writeAtomic(path string, content []byte, mode os.FileMode) error {

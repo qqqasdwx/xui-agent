@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,7 +99,7 @@ func testArchive(t *testing.T, marker string) []byte {
 	return output.Bytes()
 }
 
-func newTestManager(t *testing.T, state string, controller *recordingController, runner *recordingRunner) *Manager {
+func newTestManager(t *testing.T, state string, controller Controller, runner *recordingRunner) *Manager {
 	t.Helper()
 	manager, err := NewManager(state, "", true, controller, runner)
 	if err != nil {
@@ -468,6 +469,246 @@ func TestManagerRecoversUnconfirmedBinarySwitch(t *testing.T) {
 	}
 }
 
+func TestManagerRecoveryAtDurableBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		switchCurrent   bool
+		recordPrevious  bool
+		persistApplied  bool
+		wantVersion     string
+		wantProcessWork bool
+		wantFailed      bool
+	}{
+		{name: "pending before switch", wantVersion: "v1.0.0", wantProcessWork: true, wantFailed: true},
+		{name: "current switched before previous", switchCurrent: true, wantVersion: "v1.0.0", wantProcessWork: true, wantFailed: true},
+		{name: "previous recorded before applied", switchCurrent: true, recordPrevious: true, wantVersion: "v1.0.0", wantProcessWork: true, wantFailed: true},
+		{name: "applied before pending removal", switchCurrent: true, recordPrevious: true, persistApplied: true, wantVersion: "v1.1.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := t.TempDir()
+			controller := &recordingController{directory: Directory(state)}
+			manager := newTestManager(t, state, controller, &recordingRunner{})
+			installVersion(t, manager, "v1.0.0")
+			previous, err := manager.Current()
+			if err != nil {
+				t.Fatalf("load previous state: %v", err)
+			}
+			writeAppliedConfig(t, state)
+
+			archive := testArchive(t, "v1.1.0")
+			digest := sha256.Sum256(archive)
+			archiveDigest := hex.EncodeToString(digest[:])
+			candidate, err := extractBundle(archive)
+			if err != nil {
+				t.Fatalf("extract candidate: %v", err)
+			}
+			target, err := manager.installBundle("v1.1.0", "v1.1.0", archiveDigest, candidate)
+			if err != nil {
+				t.Fatalf("install candidate: %v", err)
+			}
+			pending := pendingState{
+				CommandID: "durable-boundary", PreviousTarget: previous.Target, PreviousApplied: previous,
+				Target: target, Version: "v1.1.0", XrayVersion: "v1.1.0", ArchiveDigest: archiveDigest, StartedAt: 2,
+			}
+			if err := writeJSONAtomic(manager.pendingPath(), pending, stateFileMode); err != nil {
+				t.Fatalf("write pending: %v", err)
+			}
+			if tc.switchCurrent {
+				if err := atomicSymlink(target, manager.currentPath()); err != nil {
+					t.Fatalf("switch current: %v", err)
+				}
+			}
+			if tc.recordPrevious {
+				if err := atomicSymlink(previous.Target, manager.previousPath()); err != nil {
+					t.Fatalf("record previous: %v", err)
+				}
+			}
+			if tc.persistApplied {
+				if err := writeJSONAtomic(manager.appliedPath(), AppliedState{
+					Version: "v1.1.0", XrayVersion: "v1.1.0", ArchiveDigest: archiveDigest, Target: target, AppliedAt: 2,
+				}, stateFileMode); err != nil {
+					t.Fatalf("persist candidate state: %v", err)
+				}
+			}
+
+			if err := manager.Recover(context.Background()); err != nil {
+				t.Fatalf("Recover: %v", err)
+			}
+			current, err := manager.Current()
+			if err != nil || current.Version != tc.wantVersion {
+				t.Fatalf("current=%+v err=%v, want %s", current, err, tc.wantVersion)
+			}
+			wantProcessCalls := 0
+			if tc.wantProcessWork {
+				wantProcessCalls = 1
+			}
+			if controller.stops != wantProcessCalls || controller.restarts != wantProcessCalls {
+				t.Fatalf("controller=%+v, want stops/restarts=%d", controller, wantProcessCalls)
+			}
+			if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pending remains: %v", err)
+			}
+			_, failedErr := os.Stat(manager.failedPath())
+			if tc.wantFailed && failedErr != nil {
+				t.Fatalf("failed state missing: %v", failedErr)
+			}
+			if !tc.wantFailed && !errors.Is(failedErr, os.ErrNotExist) {
+				t.Fatalf("unexpected failed state: %v", failedErr)
+			}
+		})
+	}
+}
+
+func TestManagerRepeatedCommandDoesNotRestartAppliedBundle(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	manager := newTestManager(t, state, controller, &recordingRunner{})
+	installVersion(t, manager, "v1.0.0")
+	writeAppliedConfig(t, state)
+	archive := testArchive(t, "v1.1.0")
+	first, err := manager.InstallLocal(context.Background(), "command-first", "v1.1.0", archive)
+	if err != nil || !first.Success() {
+		t.Fatalf("first install result=%+v err=%v", first, err)
+	}
+	stops, restarts := controller.stops, controller.restarts
+	second, err := manager.InstallLocal(context.Background(), "command-retry", "v1.1.0", archive)
+	if err != nil || !second.Success() {
+		t.Fatalf("repeated install result=%+v err=%v", second, err)
+	}
+	if controller.stops != stops || controller.restarts != restarts {
+		t.Fatalf("repeated command changed process counts from (%d,%d) to (%d,%d)", stops, restarts, controller.stops, controller.restarts)
+	}
+}
+
+func TestManagerReportsStorageFailureBeforeBinarySwitch(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "disk full", err: syscall.ENOSPC},
+		{name: "read only filesystem", err: syscall.EROFS},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := t.TempDir()
+			controller := &recordingController{directory: Directory(state)}
+			manager := newTestManager(t, state, controller, &recordingRunner{})
+			installVersion(t, manager, "v1.0.0")
+			first, err := manager.Current()
+			if err != nil {
+				t.Fatalf("load first state: %v", err)
+			}
+			writeAppliedConfig(t, state)
+			manager.writeState = func(path string, value any, mode os.FileMode) error {
+				if path == manager.pendingPath() {
+					return tc.err
+				}
+				return writeJSONAtomic(path, value, mode)
+			}
+
+			if _, err := manager.InstallLocal(context.Background(), "command-v1.1.0", "v1.1.0", testArchive(t, "v1.1.0")); err == nil || !errors.Is(err, tc.err) {
+				t.Fatalf("storage failure = %v, want %v", err, tc.err)
+			} else if code, recovery := ErrorDetails(err); code != ErrorCodePreparationFailed || recovery != RecoveryStatusNotRequired {
+				t.Fatalf("storage failure details=(%q,%q)", code, recovery)
+			}
+			current, err := manager.Current()
+			if err != nil || current.Target != first.Target || current.Version != first.Version {
+				t.Fatalf("current=%+v err=%v, want unchanged %+v", current, err, first)
+			}
+			if controller.stops != 0 || controller.restarts != 0 {
+				t.Fatalf("storage failure changed process state: %+v", controller)
+			}
+			if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("pending state exists after failed persistence: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagerPreflightRejectsCorruptPIDBeforeBinarySwitch(t *testing.T) {
+	state := t.TempDir()
+	controller := xrayruntime.NewProcessController(state, "/bin/sh")
+	manager := newTestManager(t, state, controller, &recordingRunner{})
+	installVersion(t, manager, "v1.0.0")
+	first, err := manager.Current()
+	if err != nil {
+		t.Fatalf("load first state: %v", err)
+	}
+	writeAppliedConfig(t, state)
+	if err := os.WriteFile(xrayruntime.PIDPath(state), []byte("not-a-pid\n"), stateFileMode); err != nil {
+		t.Fatalf("write corrupt pid: %v", err)
+	}
+
+	if _, err := manager.InstallLocal(context.Background(), "command-v1.1.0", "v1.1.0", testArchive(t, "v1.1.0")); err == nil || !strings.Contains(err.Error(), "pid file is invalid") {
+		t.Fatalf("corrupt pid error = %v", err)
+	} else if code, recovery := ErrorDetails(err); code != ErrorCodePreparationFailed || recovery != RecoveryStatusNotRequired {
+		t.Fatalf("corrupt pid details=(%q,%q)", code, recovery)
+	}
+	current, err := manager.Current()
+	if err != nil || current.Target != first.Target {
+		t.Fatalf("current=%+v err=%v, want unchanged %+v", current, err, first)
+	}
+	if _, err := os.Stat(manager.pendingPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("pending state exists after failed preflight: %v", err)
+	}
+}
+
+func TestManagerRecoveryDeselectsCandidateWhenRollbackBundleIsMissing(t *testing.T) {
+	state := t.TempDir()
+	controller := &recordingController{directory: Directory(state)}
+	manager := newTestManager(t, state, controller, &recordingRunner{})
+	installVersion(t, manager, "v1.0.0")
+	previous, err := manager.Current()
+	if err != nil {
+		t.Fatalf("load previous state: %v", err)
+	}
+	writeAppliedConfig(t, state)
+	archive := testArchive(t, "v1.1.0")
+	digest := sha256.Sum256(archive)
+	archiveDigest := hex.EncodeToString(digest[:])
+	candidate, err := extractBundle(archive)
+	if err != nil {
+		t.Fatalf("extract candidate: %v", err)
+	}
+	target, err := manager.installBundle("v1.1.0", "v1.1.0", archiveDigest, candidate)
+	if err != nil {
+		t.Fatalf("install candidate: %v", err)
+	}
+	pending := pendingState{
+		CommandID: "missing-rollback", PreviousTarget: previous.Target, PreviousApplied: previous,
+		Target: target, Version: "v1.1.0", XrayVersion: "v1.1.0", ArchiveDigest: archiveDigest, StartedAt: 2,
+	}
+	if err := writeJSONAtomic(manager.pendingPath(), pending, stateFileMode); err != nil {
+		t.Fatalf("write pending: %v", err)
+	}
+	if err := atomicSymlink(target, manager.currentPath()); err != nil {
+		t.Fatalf("switch current: %v", err)
+	}
+	if err := removeBundleDirectory(filepath.Join(manager.directory, previous.Target)); err != nil {
+		t.Fatalf("remove rollback bundle: %v", err)
+	}
+
+	err = manager.Recover(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "verify previous Xray binary") {
+		t.Fatalf("missing rollback error = %v", err)
+	}
+	if code, recovery := ErrorDetails(err); code != ErrorCodeRecoveryFailed || recovery != RecoveryStatusFailed {
+		t.Fatalf("missing rollback details=(%q,%q)", code, recovery)
+	}
+	if _, err := os.Lstat(manager.currentPath()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed candidate remained selected: %v", err)
+	}
+	if _, err := os.Stat(manager.pendingPath()); err != nil {
+		t.Fatalf("pending recovery point was not retained: %v", err)
+	}
+	failure, err := LoadFailureState(state)
+	if err != nil || failure.RecoveryStatus != RecoveryStatusFailed {
+		t.Fatalf("failure=%+v err=%v", failure, err)
+	}
+	if controller.stops != 1 || controller.restarts != 0 {
+		t.Fatalf("controller=%+v, want stopped candidate without restart", controller)
+	}
+}
+
 func TestManagerIdempotentInstallClearsPreviousFailure(t *testing.T) {
 	state := t.TempDir()
 	controller := &recordingController{directory: Directory(state)}
@@ -562,5 +803,36 @@ func TestExtractBundleRejectsUnexpectedEntries(t *testing.T) {
 	}
 	if _, err := extractBundle(output.Bytes()); err == nil {
 		t.Fatal("archive with nested path was accepted")
+	}
+}
+
+func TestExecRunnerDoesNotExposeFailedCommandOutput(t *testing.T) {
+	directory := t.TempDir()
+	binary := filepath.Join(directory, "xray")
+	secret := "client-credential-must-not-leak"
+	script := "#!/bin/sh\necho '" + secret + "' >&2\nexit 23\n"
+	if err := os.WriteFile(binary, []byte(script), 0o700); err != nil {
+		t.Fatalf("write fake xray: %v", err)
+	}
+	configPath := filepath.Join(directory, "config.json")
+	if err := os.WriteFile(configPath, []byte(`{"inbounds":[]}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{name: "version", run: func() error { return (ExecRunner{}).ValidateVersion(context.Background(), binary, "v1") }},
+		{name: "config", run: func() error { return (ExecRunner{}).ValidateConfig(context.Background(), binary, configPath) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.run()
+			if err == nil || !strings.Contains(err.Error(), "exit status 23") {
+				t.Fatalf("command error = %v", err)
+			}
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("command error exposed Xray output: %v", err)
+			}
+		})
 	}
 }
