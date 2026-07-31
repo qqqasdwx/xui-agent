@@ -1,10 +1,15 @@
 package update
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 func TestLauncherRollsBackAFailedPendingVersion(t *testing.T) {
@@ -61,5 +66,90 @@ func TestLauncherRollsBackAFailedPendingVersion(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(state, pendingFilename)); !os.IsNotExist(err) {
 		t.Fatalf("pending state still exists: %v", err)
+	}
+}
+
+func TestLauncherForwardsTerminationToAgent(t *testing.T) {
+	state := t.TempDir()
+	versionDirectory := filepath.Join(state, "versions", "current")
+	if err := os.MkdirAll(versionDirectory, 0o700); err != nil {
+		t.Fatalf("create version directory: %v", err)
+	}
+	childPIDFile := filepath.Join(state, "child.pid")
+	terminatedFile := filepath.Join(state, "terminated")
+	binary := filepath.Join(versionDirectory, "xui-agent")
+	fakeAgent := `#!/bin/sh
+printf '%s\n' "$$" > "$XUI_AGENT_CHILD_PID_FILE"
+trap 'printf terminated > "$XUI_AGENT_TERMINATED_FILE"; exit 0' TERM
+while :; do sleep 1; done
+`
+	if err := os.WriteFile(binary, []byte(fakeAgent), 0o755); err != nil {
+		t.Fatalf("write fake agent: %v", err)
+	}
+	if err := os.Symlink("versions/current/xui-agent", filepath.Join(state, "current")); err != nil {
+		t.Fatalf("create current link: %v", err)
+	}
+
+	launcher := filepath.Join("..", "..", "deploy", "xui-agent-launcher")
+	command := exec.Command("sh", launcher)
+	command.Env = append(os.Environ(),
+		"XUI_AGENT_STATE_DIRECTORY="+state,
+		"XUI_AGENT_CONFIG_PATH=/unused",
+		"XUI_AGENT_CHILD_PID_FILE="+childPIDFile,
+		"XUI_AGENT_TERMINATED_FILE="+terminatedFile,
+	)
+	if err := command.Start(); err != nil {
+		t.Fatalf("start launcher: %v", err)
+	}
+	launcherExited := false
+	childPID := 0
+	t.Cleanup(func() {
+		if !launcherExited {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+		}
+		if childPID > 0 {
+			_ = syscall.Kill(childPID, syscall.SIGKILL)
+		}
+	})
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(childPIDFile)
+		if err == nil {
+			childPID, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				t.Fatalf("parse child PID: %v", err)
+			}
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read child PID: %v", err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if childPID == 0 {
+		t.Fatal("launcher did not start the agent")
+	}
+
+	if err := command.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatalf("terminate launcher: %v", err)
+	}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- command.Wait() }()
+	select {
+	case err := <-waitResult:
+		launcherExited = true
+		if err != nil {
+			t.Fatalf("launcher exit: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("launcher did not exit after SIGTERM")
+	}
+	if _, err := os.Stat(terminatedFile); err != nil {
+		t.Fatalf("agent did not receive SIGTERM: %v", err)
+	}
+	if err := syscall.Kill(childPID, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("agent process %d still exists after launcher exit: %v", childPID, err)
 	}
 }
