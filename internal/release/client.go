@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const downloadTimeout = 10 * time.Minute
+
 type Client struct {
 	allowInsecure bool
 	httpClient    *http.Client
@@ -28,7 +30,7 @@ func NewClient(baseURL string, allowInsecure bool) (*Client, error) {
 		return nil, err
 	}
 	client.httpClient = &http.Client{
-		Timeout: 2 * time.Minute,
+		Timeout: downloadTimeout,
 		CheckRedirect: func(request *http.Request, _ []*http.Request) error {
 			return client.validateRedirectURL(request.URL)
 		},

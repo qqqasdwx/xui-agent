@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestURLPinsRepositoryAndReleaseShape(t *testing.T) {
@@ -28,6 +29,16 @@ func TestURLPinsRepositoryAndReleaseShape(t *testing.T) {
 	}
 	if latest != "https://github.com/qqqasdwx/Xray-core/releases/latest/download/xray-manifest.json" {
 		t.Fatalf("latest URL = %q", latest)
+	}
+}
+
+func TestClientAllowsSlowReleaseDownloadsWithinCommandLifetime(t *testing.T) {
+	client, err := NewClient("https://github.com", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if client.httpClient.Timeout != 10*time.Minute {
+		t.Fatalf("HTTP timeout = %s, want 10m", client.httpClient.Timeout)
 	}
 }
 
