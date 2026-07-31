@@ -116,8 +116,6 @@ done
 machine=$(uname -m)
 case "$machine" in
     x86_64|amd64) archive_arch=amd64; xray_arch=amd64 ;;
-    aarch64|arm64) archive_arch=arm64; xray_arch=arm64 ;;
-    armv7l|armv7) archive_arch=armv7; xray_arch=arm32 ;;
     *) echo "unsupported architecture: $machine" >&2; exit 1 ;;
 esac
 if [ -z "$XRAY_BINARY" ]; then

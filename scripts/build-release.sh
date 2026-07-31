@@ -58,8 +58,6 @@ build_archive() {
 }
 
 build_archive amd64 amd64
-build_archive arm64 arm64
-build_archive arm armv7 7
 
 (
     cd "$OUTPUT_DIRECTORY"

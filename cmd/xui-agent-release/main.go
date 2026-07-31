@@ -36,7 +36,7 @@ func createManifest(dist, version, publishedAt string) error {
 		return errors.New("published-at must be RFC3339")
 	}
 	manifest := updatepkg.Manifest{SchemaVersion: updatepkg.ManifestSchemaVersion, Version: version, PublishedAt: publishedAt}
-	for _, arch := range []string{"amd64", "arm64", "armv7"} {
+	for _, arch := range []string{"amd64"} {
 		name := "xui-agent-linux-" + arch + ".tar.gz"
 		path := filepath.Join(dist, name)
 		raw, err := os.ReadFile(path)

@@ -32,7 +32,7 @@ This runtime validation is the Xray configuration compatibility gate. A version 
 The maintained `qqqasdwx/Xray-core` release publishes:
 
 - `xray-manifest.json`
-- Linux ZIP archives for `amd64`, `arm64`, and `armv7`
+- one Linux ZIP archive for `amd64`
 
 The manifest `version` is the unique Fork Release tag, for example `v26.7.28-xui.1`. `xrayVersion` is the value reported by the executable, for example `26.7.28`. The manifest also binds publication time, platform, archive size, and SHA-256. GitHub is the release trust root; the Agent accepts neither a repository nor an artifact URL from the center.
 

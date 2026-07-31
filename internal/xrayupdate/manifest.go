@@ -35,10 +35,6 @@ func releaseAssetName(arch string) string {
 	switch arch {
 	case "amd64":
 		return "Xray-linux-64.zip"
-	case "arm64":
-		return "Xray-linux-arm64-v8a.zip"
-	case "armv7":
-		return "Xray-linux-arm32-v7a.zip"
 	default:
 		return ""
 	}

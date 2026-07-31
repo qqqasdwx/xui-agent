@@ -14,7 +14,7 @@ import (
 
 func TestCreateManifestWritesChecksummedMetadata(t *testing.T) {
 	dist := t.TempDir()
-	for _, arch := range []string{"amd64", "arm64", "armv7"} {
+	for _, arch := range []string{"amd64"} {
 		if err := os.WriteFile(filepath.Join(dist, "xui-agent-linux-"+arch+".tar.gz"), releaseArchive(t, arch), 0o644); err != nil {
 			t.Fatalf("write archive: %v", err)
 		}
@@ -36,7 +36,7 @@ func TestCreateManifestWritesChecksummedMetadata(t *testing.T) {
 	if decoded.SchemaVersion != updatepkg.ManifestSchemaVersion || len(decoded.RuntimeAssetsSHA256) != 64 {
 		t.Fatalf("runtime assets metadata is incomplete: %+v", decoded)
 	}
-	for _, arch := range []string{"amd64", "arm64", "armv7"} {
+	for _, arch := range []string{"amd64"} {
 		archive, err := os.ReadFile(filepath.Join(dist, "xui-agent-linux-"+arch+".tar.gz"))
 		if err != nil {
 			t.Fatalf("read %s archive: %v", arch, err)

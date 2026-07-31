@@ -85,7 +85,7 @@ Revoke the node credential in the center before permanent removal.
 
 ## Releases
 
-Release tags build deterministic Linux archives for `amd64`, `arm64`, and `armv7`. Manifest schema 3 binds each platform archive's size and SHA-256 plus the identical runtime-assets digest across all architectures. The Agent constructs manifest and archive URLs itself from the fixed repository; the center can select only `latest` or a validated Release tag. The workflow requires no release-signing Secret and refuses to overwrite existing release assets.
+Release tags build a deterministic Linux `amd64` archive. Manifest schema 3 binds the archive's size and SHA-256 plus its runtime-assets digest. The Agent constructs manifest and archive URLs itself from the fixed repository; the center can select only `latest` or a validated Release tag. The workflow requires no release-signing Secret and refuses to overwrite existing release assets. ARM nodes are not supported.
 
 Local checks:
 
