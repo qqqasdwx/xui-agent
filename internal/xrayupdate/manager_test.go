@@ -109,6 +109,7 @@ func newTestManager(t *testing.T, state string, controller Controller, runner *r
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	manager.legacyTempDir = t.TempDir()
 	return manager
 }
 
@@ -147,8 +148,6 @@ func writeAppliedConfig(t *testing.T, state string) {
 }
 
 func TestManagerDownloadsChecksummedBundleFromPinnedReleaseShape(t *testing.T) {
-	downloadTemp := t.TempDir()
-	t.Setenv("TMPDIR", downloadTemp)
 	arch := runtime.GOARCH
 	if arch == "arm" {
 		arch = "armv7"
@@ -192,12 +191,38 @@ func TestManagerDownloadsChecksummedBundleFromPinnedReleaseShape(t *testing.T) {
 	if err != nil || !result.Success() || result.Version != manifest.Version {
 		t.Fatalf("Apply result=%+v err=%v", result, err)
 	}
-	entries, err := os.ReadDir(downloadTemp)
+	entries, err := os.ReadDir(filepath.Join(manager.directory, downloadsName))
 	if err != nil {
 		t.Fatalf("read download temp: %v", err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("Xray release temporary files were not cleaned: %v", entries)
+	}
+}
+
+func TestManagerRecoverRemovesInterruptedDownloads(t *testing.T) {
+	state := t.TempDir()
+	manager := newTestManager(t, state, &recordingController{directory: Directory(state)}, &recordingRunner{})
+	downloadDirectory, err := manager.ensureDownloadDirectory()
+	if err != nil {
+		t.Fatalf("ensure download directory: %v", err)
+	}
+	stale := filepath.Join(downloadDirectory, "xray-release-interrupted")
+	if err := os.WriteFile(stale, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write interrupted download: %v", err)
+	}
+	legacy := filepath.Join(manager.legacyTempDir, ".xui-agent-xray-release-interrupted")
+	if err := os.WriteFile(legacy, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write legacy interrupted download: %v", err)
+	}
+
+	if err := manager.Recover(context.Background()); err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	for _, path := range []string{stale, legacy} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("stale download %q remains: %v", path, err)
+		}
 	}
 }
 

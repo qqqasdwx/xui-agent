@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/qqqasdwx/xui-agent/internal/release"
@@ -39,6 +40,9 @@ const (
 	RecoveryStatusUnknown     = "unknown"
 
 	directoryName      = "xray-runtime"
+	downloadsName      = ".downloads"
+	downloadPattern    = "xray-release-*"
+	legacyTempPattern  = ".xui-agent-xray-release-*"
 	versionsName       = "versions"
 	currentName        = "current"
 	previousName       = "previous"
@@ -165,6 +169,7 @@ type Manager struct {
 	controller     Controller
 	runner         Runner
 	writeState     func(string, any, os.FileMode) error
+	legacyTempDir  string
 	mu             sync.Mutex
 }
 
@@ -182,6 +187,7 @@ func NewManager(stateDirectory string, controller Controller, runner Runner) (*M
 		releases:       releases,
 		controller:     controller,
 		runner:         runner,
+		legacyTempDir:  os.TempDir(),
 	}, nil
 }
 
@@ -225,7 +231,11 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
 	}
-	archive, err := os.CreateTemp("", ".xui-agent-xray-release-*")
+	downloadDirectory, err := m.ensureDownloadDirectory()
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("prepare Xray release download directory: %w", err))
+	}
+	archive, err := os.CreateTemp(downloadDirectory, downloadPattern)
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, fmt.Errorf("create Xray release temporary file: %w", err))
 	}
@@ -415,6 +425,9 @@ func (m *Manager) Recover(ctx context.Context) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := m.cleanupStaleDownloads(); err != nil {
+		return fmt.Errorf("clean stale Xray release downloads: %w", err)
+	}
 	pending, err := m.loadPending()
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -843,6 +856,83 @@ func (m *Manager) ensureDirectory() error {
 		return err
 	}
 	return os.Chmod(m.directory, stateDirectoryMode)
+}
+
+func (m *Manager) ensureDownloadDirectory() (string, error) {
+	if err := m.ensureDirectory(); err != nil {
+		return "", err
+	}
+	directory := filepath.Join(m.directory, downloadsName)
+	if err := os.MkdirAll(directory, stateDirectoryMode); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("Xray release download path is not a directory")
+	}
+	if err := os.Chmod(directory, stateDirectoryMode); err != nil {
+		return "", err
+	}
+	return directory, nil
+}
+
+func (m *Manager) cleanupStaleDownloads() error {
+	directory, err := m.ensureDownloadDirectory()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("stale Xray release download %q is not a regular file", entry.Name())
+		}
+		if err := os.Remove(filepath.Join(directory, entry.Name())); err != nil {
+			return err
+		}
+	}
+	if len(entries) > 0 {
+		if err := syncDirectory(directory); err != nil {
+			return err
+		}
+	}
+	return m.cleanupLegacyDownloads()
+}
+
+func (m *Manager) cleanupLegacyDownloads() error {
+	if m.legacyTempDir == "" {
+		return nil
+	}
+	paths, err := filepath.Glob(filepath.Join(m.legacyTempDir, legacyTempPattern))
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		info, err := os.Lstat(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || !info.Mode().IsRegular() || stat.Uid != uint32(os.Geteuid()) {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) loadApplied() (*AppliedState, error) {
