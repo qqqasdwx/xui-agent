@@ -731,6 +731,23 @@ func TestManagerPreflightRejectsCorruptPIDBeforeBinarySwitch(t *testing.T) {
 	}
 }
 
+func TestManagerReportsMissingCurrentAsCorruptAppliedState(t *testing.T) {
+	state := t.TempDir()
+	manager := newTestManager(t, state, &recordingController{directory: Directory(state)}, &recordingRunner{})
+	installVersion(t, manager, "v1.0.0")
+	if err := os.Remove(manager.currentPath()); err != nil {
+		t.Fatalf("remove current link: %v", err)
+	}
+
+	_, err := manager.Current()
+	if !errors.Is(err, errAppliedStateCorrupt) {
+		t.Fatalf("Current error = %v, want errAppliedStateCorrupt", err)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("corrupt applied state was reported as absent: %v", err)
+	}
+}
+
 func TestManagerRecoveryDeselectsCandidateWhenRollbackBundleIsMissing(t *testing.T) {
 	state := t.TempDir()
 	controller := &recordingController{directory: Directory(state)}

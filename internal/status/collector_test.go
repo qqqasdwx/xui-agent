@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,6 +174,27 @@ func TestCollectorReportsConfirmedManagedConfigVersion(t *testing.T) {
 	status = collector.collectXray(context.Background())
 	if status.RecoveryStatus != xrayruntime.RecoveryStatusRolledBack || status.RecoveryErrorCode != xrayruntime.ErrorCodeActivationFailed {
 		t.Fatalf("managed recovery status=%+v", status)
+	}
+}
+
+func TestCollectorReportsCorruptAppliedBinaryState(t *testing.T) {
+	state := t.TempDir()
+	runtimeDirectory := filepath.Join(state, "xray-runtime")
+	if err := os.MkdirAll(runtimeDirectory, 0o700); err != nil {
+		t.Fatalf("create runtime directory: %v", err)
+	}
+	applied := `{"version":"v1","xrayVersion":"v1","archiveDigest":"` + strings.Repeat("a", 64) + `","target":"versions/v1","appliedAt":1}`
+	if err := os.WriteFile(filepath.Join(runtimeDirectory, "applied.json"), []byte(applied), 0o600); err != nil {
+		t.Fatalf("write applied state: %v", err)
+	}
+
+	collector := NewCollector(config.XrayConfig{
+		Mode:       config.XrayModeManaged,
+		BinaryPath: "/opt/xray/bootstrap",
+	}, state, time.Now())
+	status := collector.collectXray(context.Background())
+	if !strings.Contains(status.Error, "applied Xray binary state is corrupt") {
+		t.Fatalf("managed binary error = %q", status.Error)
 	}
 }
 

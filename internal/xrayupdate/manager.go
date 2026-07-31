@@ -57,6 +57,8 @@ const (
 	manifestAssetName  = "xray-manifest.json"
 )
 
+var errAppliedStateCorrupt = errors.New("applied Xray binary state is corrupt")
+
 type Request struct {
 	CommandID string
 	Version   string
@@ -547,7 +549,7 @@ func (m *Manager) Current() (*AppliedState, error) {
 		return nil, err
 	}
 	if err := m.verifyApplied(applied); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %v", errAppliedStateCorrupt, err)
 	}
 	return applied, nil
 }
