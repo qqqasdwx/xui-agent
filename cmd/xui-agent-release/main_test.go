@@ -4,9 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,24 +12,18 @@ import (
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
 )
 
-func TestCreateManifestWritesSignedFiles(t *testing.T) {
-	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
+func TestCreateManifestWritesChecksummedMetadata(t *testing.T) {
 	dist := t.TempDir()
 	for _, arch := range []string{"amd64", "arm64", "armv7"} {
 		if err := os.WriteFile(filepath.Join(dist, "xui-agent-linux-"+arch+".tar.gz"), releaseArchive(t, arch), 0o644); err != nil {
 			t.Fatalf("write archive: %v", err)
 		}
 	}
-	if err := createManifest(dist, "v1.2.3", "owner/repository", "2026-07-29T00:00:00Z", base64.StdEncoding.EncodeToString(privateKey)); err != nil {
+	if err := createManifest(dist, "v1.2.3", "2026-07-29T00:00:00Z"); err != nil {
 		t.Fatalf("createManifest: %v", err)
 	}
-	for _, name := range []string{"manifest.json", "manifest.sig"} {
-		if info, err := os.Stat(filepath.Join(dist, name)); err != nil || info.Size() == 0 {
-			t.Fatalf("%s was not written: info=%v err=%v", name, info, err)
-		}
+	if info, err := os.Stat(filepath.Join(dist, "manifest.json")); err != nil || info.Size() == 0 {
+		t.Fatalf("manifest.json was not written: info=%v err=%v", info, err)
 	}
 	manifest, err := os.ReadFile(filepath.Join(dist, "manifest.json"))
 	if err != nil {
@@ -55,13 +46,8 @@ func TestCreateManifestWritesSignedFiles(t *testing.T) {
 			t.Fatalf("%s runtime assets digest = %q, err=%v", arch, digest, err)
 		}
 	}
-	encodedSignature, err := os.ReadFile(filepath.Join(dist, "manifest.sig"))
-	if err != nil {
-		t.Fatalf("read signature: %v", err)
-	}
-	signature, err := base64.StdEncoding.DecodeString(string(encodedSignature))
-	if err != nil || !ed25519.Verify(privateKey.Public().(ed25519.PublicKey), manifest, signature) {
-		t.Fatal("release manifest signature did not verify")
+	if _, err := os.Stat(filepath.Join(dist, "manifest.sig")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected manifest signature: %v", err)
 	}
 }
 

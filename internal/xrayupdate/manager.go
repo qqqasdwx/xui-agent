@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/qqqasdwx/xui-agent/internal/signedrelease"
+	"github.com/qqqasdwx/xui-agent/internal/release"
 	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 )
 
@@ -51,13 +51,14 @@ const (
 	maxStateBytes      = 64 << 10
 	validationTimeout  = 15 * time.Second
 	recoveryTimeout    = 30 * time.Second
+	releaseBaseURL     = "https://github.com"
+	releaseRepository  = "qqqasdwx/Xray-core"
+	manifestAssetName  = "xray-manifest.json"
 )
 
 type Request struct {
-	CommandID    string
-	Version      string
-	ManifestURL  string
-	SignatureURL string
+	CommandID string
+	Version   string
 }
 
 type Result struct {
@@ -157,15 +158,15 @@ func (ExecRunner) ValidateConfig(ctx context.Context, binaryPath, configPath str
 type Manager struct {
 	stateDirectory string
 	directory      string
-	releases       *signedrelease.Client
+	releases       *release.Client
 	controller     Controller
 	runner         Runner
 	writeState     func(string, any, os.FileMode) error
 	mu             sync.Mutex
 }
 
-func NewManager(stateDirectory, publicKey string, allowInsecure bool, controller Controller, runner Runner) (*Manager, error) {
-	releases, err := signedrelease.NewClient(publicKey, allowInsecure)
+func NewManager(stateDirectory string, controller Controller, runner Runner) (*Manager, error) {
+	releases, err := release.NewClient(releaseBaseURL, false)
 	if err != nil {
 		return nil, err
 	}
@@ -182,12 +183,12 @@ func NewManager(stateDirectory, publicKey string, allowInsecure bool, controller
 }
 
 func (m *Manager) Enabled() bool {
-	return m != nil && m.releases.Enabled() && m.controller != nil && m.runner != nil
+	return m != nil && m.releases != nil && m.controller != nil && m.runner != nil
 }
 
 func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 	if !m.Enabled() {
-		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, errors.New("signed Xray updates are not configured"))
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, errors.New("Xray release updates are not configured"))
 	}
 	if request.CommandID == "" || len(request.CommandID) > 256 {
 		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, errors.New("Xray update command id is invalid"))
@@ -197,7 +198,11 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 			return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, err)
 		}
 	}
-	manifestRaw, err := m.releases.FetchSigned(ctx, request.ManifestURL, request.SignatureURL, maxManifestBytes)
+	manifestURL, err := m.releases.URL(releaseRepository, request.Version, manifestAssetName)
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodePreparationFailed, RecoveryStatusNotRequired, err)
+	}
+	manifestRaw, err := m.releases.Download(ctx, manifestURL, maxManifestBytes)
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
 	}
@@ -213,7 +218,11 @@ func (m *Manager) Apply(ctx context.Context, request Request) (Result, error) {
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
 	}
-	archive, err := m.releases.Download(ctx, artifact.URL, maxArchiveBytes)
+	archiveURL, err := m.releases.URL(releaseRepository, manifest.Version, releaseAssetName(artifact.Arch))
+	if err != nil {
+		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, err)
+	}
+	archive, err := m.releases.Download(ctx, archiveURL, maxArchiveBytes)
 	if err != nil {
 		return Result{}, newUpdateError(ErrorCodeValidationFailed, RecoveryStatusNotRequired, fmt.Errorf("download Xray release archive: %w", err))
 	}

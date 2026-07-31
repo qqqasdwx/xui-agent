@@ -80,7 +80,7 @@ func prepareUpdate(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read candidate binary: %w", err)
 	}
-	manager, err := updatepkg.NewManager(*stateDirectory, "", false, "")
+	manager, err := updatepkg.NewManager(*stateDirectory, "")
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,6 @@ func initConfig(args []string) error {
 	stateDirectory := flags.String("state-directory", "/var/lib/xui-agent", "agent state directory")
 	allowInsecure := flags.Bool("allow-insecure", false, "allow plain HTTP (testing only)")
 	serverCertSHA256 := flags.String("server-cert-sha256", "", "optional server certificate SHA-256 fingerprint")
-	updatePublicKey := flags.String("update-public-key", "", "base64 Ed25519 release verification key")
 	xrayBinary := flags.String("xray-binary", "/usr/local/x-ui/bin/xray-linux-amd64", "Xray binary path")
 	xrayMode := flags.String("xray-mode", config.XrayModeObserve, "Xray mode: observe or managed")
 	xrayConfig := flags.String("xray-config", "/usr/local/x-ui/bin/config.json", "Xray config path")
@@ -204,7 +203,7 @@ func initConfig(args []string) error {
 		StateDirectory:   *stateDirectory,
 		AllowInsecure:    *allowInsecure,
 		ServerCertSHA256: *serverCertSHA256,
-		Update:           config.UpdateConfig{PublicKey: *updatePublicKey},
+		Update:           config.UpdateConfig{},
 		Xray: config.XrayConfig{
 			Mode:       *xrayMode,
 			BinaryPath: *xrayBinary,

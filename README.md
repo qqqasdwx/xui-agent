@@ -4,11 +4,11 @@
 
 ## Current Scope
 
-The Agent reports system and Xray status, supports signed updates of its own binary, and can shadow-validate a complete node configuration received from the central control plane. A shadow validation writes only to the Agent state directory and runs the configured Xray binary with `run -test`; it does not replace the running configuration or start, stop, signal, or restart Xray.
+The Agent reports system and Xray status, updates its own binary from the fixed `qqqasdwx/xui-agent` GitHub Release source, and can shadow-validate a complete node configuration received from the central control plane. A shadow validation writes only to the Agent state directory and runs the configured Xray binary with `run -test`; it does not replace the running configuration or start, stop, signal, or restart Xray.
 
 Setting `xray.mode` to `managed` enables the separate configuration-apply capability. Managed mode stores immutable configuration versions under the Agent state directory, atomically switches `current.json` and `previous.json`, and runs Xray in a dedicated systemd service. A candidate is confirmed only after the replacement Xray process remains healthy; startup failure restores the previous version. The default `observe` mode never advertises this capability.
 
-Managed mode can also install and update a complete signed Xray bundle when a release public key is configured. The executable, `geoip.dat`, and `geosite.dat` are pinned and rolled back as one unit. An existing managed installation may keep its configured Xray path as the bootstrap fallback for the first signed bundle; after that bundle is confirmed, the Agent uses only the selected managed runtime. Existing configurations are checked with the candidate before a managed restart; protocol v1 does not claim hot binary replacement. See [Managed Xray Release Contract](docs/managed-xray-release-contract.md) for the capability matrix, activation rules, and rollout order.
+Managed mode can also install and update a complete Xray bundle from the fixed `qqqasdwx/Xray-core` GitHub Release source. The executable, `geoip.dat`, and `geosite.dat` are pinned and rolled back as one unit. An existing managed installation may keep its configured Xray path as the bootstrap fallback for the first managed bundle; after that bundle is confirmed, the Agent uses only the selected managed runtime. Existing configurations are checked with the candidate before a managed restart; protocol v1 does not claim hot binary replacement. See [Managed Xray Release Contract](docs/managed-xray-release-contract.md) for the capability matrix, activation rules, and rollout order.
 
 Configuration validation commands are limited to 4 MiB, carry a monotonic version and SHA-256 digest, and are idempotent across Agent restarts. Older versions and a reused version with a different digest are rejected.
 
@@ -23,13 +23,14 @@ The equivalent command shape is:
 ```sh
 curl -fsSL https://github.com/qqqasdwx/xui-agent/releases/latest/download/install.sh |
   env XUI_AGENT_ENROLLMENT_TOKEN='one-time-token' sh -s -- \
-    --server-url 'https://panel.example.com/base-path' \
-    --update-public-key 'base64-ed25519-public-key'
+    --server-url 'https://panel.example.com/base-path'
 ```
 
 Plain HTTP is rejected unless `--allow-insecure` is explicitly provided. This option is intended for isolated tests.
 
 The installer preserves an existing configuration and identity. Supplying a new one-time token performs credential rotation without placing the token in a file. Re-running a newer release installer upgrades both the Agent binary and its root-owned runtime assets. It records the active binary as `previous`, switches `current` atomically, and waits for the new Agent's first authenticated heartbeat. A startup or health failure restores the previous binary and makes the installer fail explicitly.
+
+Installations at `v0.3.3` or earlier must run the new Release installer once because those binaries only understand the retired signed-manifest schema. The parser accepts an existing `update.publicKey` value during this transition but ignores it; new installations do not write the field.
 
 ## Runtime Files
 
@@ -53,7 +54,7 @@ The installer preserves an existing configuration and identity. Supplying a new 
 
 The launcher rolls back a pending release when the new binary exits before completing an authenticated heartbeat. A successful first heartbeat removes the pending marker and confirms the update.
 
-Signed binary updates also compare the release manifest's runtime-assets digest with the root-owned marker written by the installer. If a release changes the launcher, systemd units, or uninstall script, the Agent rejects binary-only activation and reports that the release installer must run first. The unprivileged Agent never writes root-owned runtime assets.
+Binary updates also compare the release manifest's runtime-assets digest with the root-owned marker written by the installer. If a release changes the launcher, systemd units, or uninstall script, the Agent rejects binary-only activation and reports that the release installer must run first. The unprivileged Agent never writes root-owned runtime assets.
 
 Runtime assets in a release must remain compatible with the immediately previous supported Agent binary because a failed candidate is rolled back under the newly installed launcher and systemd units. A breaking runtime-asset change requires a staged compatibility release before the incompatible assets can ship.
 
@@ -84,9 +85,7 @@ Revoke the node credential in the center before permanent removal.
 
 ## Releases
 
-Release tags build deterministic Linux archives for `amd64`, `arm64`, and `armv7`. Each signed manifest binds the binary archive and the identical runtime-assets digest across all architectures. The workflow requires the GitHub Actions secret `XUI_AGENT_RELEASE_PRIVATE_KEY`, containing a base64 Ed25519 seed or private key. The workflow verifies that its corresponding public key matches [`deploy/release-public-key.txt`](deploy/release-public-key.txt) before publishing and refuses to overwrite existing release assets.
-
-Configure the value from `deploy/release-public-key.txt` on the central 3x-ui process as `XUI_AGENT_RELEASE_PUBLIC_KEY`; enrollment commands then pin that key in the Agent configuration.
+Release tags build deterministic Linux archives for `amd64`, `arm64`, and `armv7`. Manifest schema 3 binds each platform archive's size and SHA-256 plus the identical runtime-assets digest across all architectures. The Agent constructs manifest and archive URLs itself from the fixed repository; the center can select only `latest` or a validated Release tag. The workflow requires no release-signing Secret and refuses to overwrite existing release assets.
 
 Local checks:
 

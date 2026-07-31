@@ -67,7 +67,7 @@ func NewClient(cfg config.Config, version string) (*Client, error) {
 		return nil, err
 	}
 	startedAt := time.Now()
-	updater, err := updatepkg.NewManager(cfg.StateDirectory, cfg.Update.PublicKey, cfg.AllowInsecure, cfg.Update.RuntimeAssetsPath)
+	updater, err := updatepkg.NewManager(cfg.StateDirectory, cfg.Update.RuntimeAssetsPath)
 	if err != nil {
 		return nil, err
 	}
@@ -92,7 +92,7 @@ func NewClient(cfg config.Config, version string) (*Client, error) {
 			validator,
 			controller,
 		)
-		xrayUpdater, err = xrayupdate.NewManager(cfg.StateDirectory, cfg.Update.PublicKey, cfg.AllowInsecure, controller, nil)
+		xrayUpdater, err = xrayupdate.NewManager(cfg.StateDirectory, controller, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -487,7 +487,6 @@ func (c *Client) executeXrayUpdate(ctx context.Context, command v1.Command, resu
 	result.Version = payload.Version
 	applied, err := c.xrayUpdater.Apply(ctx, xrayupdate.Request{
 		CommandID: command.ID, Version: payload.Version,
-		ManifestURL: payload.ManifestURL, SignatureURL: payload.SignatureURL,
 	})
 	if err != nil {
 		result.Error = safeUpdateError(err)
@@ -568,7 +567,6 @@ func (c *Client) executeAgentUpdate(ctx context.Context, command v1.Command, res
 	}
 	version, err := c.updater.Apply(ctx, updatepkg.Request{
 		CommandID: command.ID, Version: payload.Version,
-		ManifestURL: payload.ManifestURL, SignatureURL: payload.SignatureURL,
 	})
 	if err != nil {
 		result.Error = safeUpdateError(err)

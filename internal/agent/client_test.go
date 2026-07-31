@@ -202,7 +202,7 @@ func TestExecuteConfigApplyCommand(t *testing.T) {
 func TestExpiredXrayUpdateReturnsTypedFailure(t *testing.T) {
 	now := time.Now()
 	command, err := v1.NewCommand("xray-expired", v1.CommandXrayUpdate, v1.XrayUpdateCommand{
-		Version: "v26.7.28", ManifestURL: "https://example.com/xray-manifest.json", SignatureURL: "https://example.com/xray-manifest.sig",
+		Version: "v26.7.28",
 	}, now.Add(-2*time.Minute), now.Add(-time.Minute))
 	if err != nil {
 		t.Fatalf("NewCommand: %v", err)
@@ -252,9 +252,7 @@ func TestXrayUpdateCapabilityAllowsManagedBootstrapBinary(t *testing.T) {
 			Mode:       config.XrayModeManaged,
 			BinaryPath: "/opt/xray/bootstrap",
 		},
-		Update: config.UpdateConfig{
-			PublicKey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-		},
+		Update: config.UpdateConfig{},
 	}
 	managed, err := NewClient(base, "test")
 	if err != nil {
@@ -423,7 +421,7 @@ func TestRunSessionRejectsMismatchedHeartbeatAcknowledgement(t *testing.T) {
 func TestExecuteCommandRejectsCorruptUpdateState(t *testing.T) {
 	now := time.Now()
 	command, err := v1.NewCommand("command-1", v1.CommandAgentUpdate, v1.AgentUpdateCommand{
-		Version: "v1.2.3", ManifestURL: "https://example.com/manifest.json", SignatureURL: "https://example.com/manifest.sig",
+		Version: "v1.2.3",
 	}, now, now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("NewCommand: %v", err)
@@ -441,7 +439,7 @@ func TestExecuteCommandRejectsCorruptUpdateState(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(state, tc.filename), []byte("not-json"), 0o600); err != nil {
 				t.Fatalf("write corrupt state: %v", err)
 			}
-			manager, err := updatepkg.NewManager(state, "", false, "")
+			manager, err := updatepkg.NewManager(state, "")
 			if err != nil {
 				t.Fatalf("NewManager: %v", err)
 			}

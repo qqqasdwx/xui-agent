@@ -1,4 +1,4 @@
-package signedrelease
+package release
 
 import (
 	"context"
@@ -7,6 +7,45 @@ import (
 	"net/http/httptest"
 	"testing"
 )
+
+func TestURLPinsRepositoryAndReleaseShape(t *testing.T) {
+	client, err := NewClient("https://github.com", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	got, err := client.URL("qqqasdwx/xui-agent", "v1.2.3", "manifest.json")
+	if err != nil {
+		t.Fatalf("URL: %v", err)
+	}
+	want := "https://github.com/qqqasdwx/xui-agent/releases/download/v1.2.3/manifest.json"
+	if got != want {
+		t.Fatalf("URL = %q, want %q", got, want)
+	}
+	latest, err := client.URL("qqqasdwx/Xray-core", "", "xray-manifest.json")
+	if err != nil {
+		t.Fatalf("latest URL: %v", err)
+	}
+	if latest != "https://github.com/qqqasdwx/Xray-core/releases/latest/download/xray-manifest.json" {
+		t.Fatalf("latest URL = %q", latest)
+	}
+}
+
+func TestURLRejectsUnstructuredValues(t *testing.T) {
+	client, err := NewClient("https://github.com", false)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	for _, test := range []struct{ repository, version, asset string }{
+		{"other", "v1", "manifest.json"},
+		{"owner/repo/extra", "v1", "manifest.json"},
+		{"owner/repo", "../v1", "manifest.json"},
+		{"owner/repo", "v1", "../manifest.json"},
+	} {
+		if _, err := client.URL(test.repository, test.version, test.asset); err == nil {
+			t.Fatalf("URL(%q, %q, %q) succeeded", test.repository, test.version, test.asset)
+		}
+	}
+}
 
 func TestDownloadAllowsSecureReleaseRedirectQuery(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
@@ -25,7 +64,7 @@ func TestDownloadAllowsSecureReleaseRedirectQuery(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewClient("", true)
+	client, err := NewClient(server.URL, true)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -39,7 +78,7 @@ func TestDownloadAllowsSecureReleaseRedirectQuery(t *testing.T) {
 }
 
 func TestDownloadRejectsQueryInInitialURL(t *testing.T) {
-	client, err := NewClient("", true)
+	client, err := NewClient("http://example.test", true)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -55,7 +94,7 @@ func TestDownloadRejectsRedirectCredentials(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client, err := NewClient("", true)
+	client, err := NewClient(server.URL, true)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}

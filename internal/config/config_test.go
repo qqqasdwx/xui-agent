@@ -54,6 +54,21 @@ func TestValidateRejectsCredentialsInServerURL(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsRetiredReleasePublicKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := []byte(`{"serverUrl":"https://panel.example.com","stateDirectory":"/var/lib/xui-agent","xray":{},"update":{"publicKey":"retired-value"}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Update.PublicKey != "retired-value" {
+		t.Fatalf("retired public key = %q", loaded.Update.PublicKey)
+	}
+}
+
 func TestWriteIsAtomicAndDoesNotOverwriteByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config", "config.json")
 	cfg := Config{ServerURL: "https://panel.example.com/base", StateDirectory: "/var/lib/xui-agent"}

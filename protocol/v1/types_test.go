@@ -45,7 +45,7 @@ func TestHeartbeatEnvelopeRoundTrip(t *testing.T) {
 func TestAgentUpdateCommandRoundTrip(t *testing.T) {
 	now := time.Unix(200, 0)
 	command, err := NewCommand("command-1", CommandAgentUpdate, AgentUpdateCommand{
-		Version: "v1.2.3", ManifestURL: "https://example.com/manifest.json", SignatureURL: "https://example.com/manifest.sig",
+		Version: "v1.2.3",
 	}, now, now.Add(10*time.Minute))
 	if err != nil {
 		t.Fatalf("NewCommand: %v", err)

@@ -8,13 +8,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/qqqasdwx/xui-agent/internal/release"
 	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
 )
 
@@ -101,7 +105,7 @@ func testArchive(t *testing.T, marker string) []byte {
 
 func newTestManager(t *testing.T, state string, controller Controller, runner *recordingRunner) *Manager {
 	t.Helper()
-	manager, err := NewManager(state, "", true, controller, runner)
+	manager, err := NewManager(state, controller, runner)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
@@ -139,6 +143,52 @@ func writeAppliedConfig(t *testing.T, state string) {
 	}
 	if err := os.WriteFile(filepath.Join(directory, appliedName), append(encoded, '\n'), 0o600); err != nil {
 		t.Fatalf("write applied config: %v", err)
+	}
+}
+
+func TestManagerDownloadsChecksummedBundleFromPinnedReleaseShape(t *testing.T) {
+	arch := runtime.GOARCH
+	if arch == "arm" {
+		arch = "armv7"
+	}
+	archive := testArchive(t, "github-release")
+	digest := sha256.Sum256(archive)
+	manifest := Manifest{
+		SchemaVersion: ManifestSchemaVersion,
+		Version:       "v26.7.28-xui.1",
+		XrayVersion:   "26.7.28",
+		PublishedAt:   "2026-07-30T12:00:00Z",
+		Artifacts: []Artifact{{
+			OS: runtime.GOOS, Arch: arch, SHA256: hex.EncodeToString(digest[:]), Size: int64(len(archive)),
+		}},
+	}
+	manifestRaw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("marshal manifest: %v", err)
+	}
+	assets := map[string][]byte{
+		"/qqqasdwx/Xray-core/releases/download/v26.7.28-xui.1/xray-manifest.json":        manifestRaw,
+		"/qqqasdwx/Xray-core/releases/download/v26.7.28-xui.1/" + releaseAssetName(arch): archive,
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		raw, ok := assets[request.URL.Path]
+		if !ok {
+			http.NotFound(response, request)
+			return
+		}
+		_, _ = response.Write(raw)
+	}))
+	defer server.Close()
+
+	state := t.TempDir()
+	manager := newTestManager(t, state, &recordingController{directory: Directory(state)}, &recordingRunner{})
+	manager.releases, err = release.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatalf("release.NewClient: %v", err)
+	}
+	result, err := manager.Apply(context.Background(), Request{CommandID: "release-command", Version: manifest.Version})
+	if err != nil || !result.Success() || result.Version != manifest.Version {
+		t.Fatalf("Apply result=%+v err=%v", result, err)
 	}
 }
 

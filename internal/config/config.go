@@ -1,8 +1,6 @@
 package config
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -46,6 +44,8 @@ func ManagedXrayBinaryPath(stateDirectory string) string {
 }
 
 type UpdateConfig struct {
+	// PublicKey is accepted only so pre-v0.4 installations can be upgraded by
+	// the release installer. Release downloads no longer use this value.
 	PublicKey         string `json:"publicKey,omitempty"`
 	RuntimeAssetsPath string `json:"runtimeAssetsPath,omitempty"`
 }
@@ -175,12 +175,6 @@ func (c Config) Validate() error {
 		}
 		if c.Xray.ConfigPath != "" || c.Xray.PIDFile != "" {
 			return errors.New("xray.configPath and xray.pidFile must be empty in managed mode")
-		}
-	}
-	if c.Update.PublicKey != "" {
-		raw, err := base64.StdEncoding.DecodeString(c.Update.PublicKey)
-		if err != nil || len(raw) != ed25519.PublicKeySize {
-			return errors.New("update.publicKey must be a base64 Ed25519 public key")
 		}
 	}
 	if c.Update.RuntimeAssetsPath != "" && !filepath.IsAbs(c.Update.RuntimeAssetsPath) {

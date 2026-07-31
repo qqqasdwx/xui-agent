@@ -1,9 +1,7 @@
-package signedrelease
+package release
 
 import (
 	"context"
-	"crypto/ed25519"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -13,54 +11,41 @@ import (
 	"time"
 )
 
-const maxSignatureBytes = 4 << 10
-
 type Client struct {
-	publicKey     ed25519.PublicKey
 	allowInsecure bool
 	httpClient    *http.Client
+	baseURL       string
 }
 
-func NewClient(encodedPublicKey string, allowInsecure bool) (*Client, error) {
-	client := &Client{allowInsecure: allowInsecure}
+func NewClient(baseURL string, allowInsecure bool) (*Client, error) {
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("release base URL is invalid")
+	}
+	client := &Client{allowInsecure: allowInsecure, baseURL: strings.TrimSuffix(baseURL, "/")}
+	if err := client.validateRedirectURL(parsed); err != nil {
+		return nil, err
+	}
 	client.httpClient = &http.Client{
 		Timeout: 2 * time.Minute,
 		CheckRedirect: func(request *http.Request, _ []*http.Request) error {
 			return client.validateRedirectURL(request.URL)
 		},
 	}
-	if encodedPublicKey == "" {
-		return client, nil
-	}
-	raw, err := base64.StdEncoding.DecodeString(encodedPublicKey)
-	if err != nil || len(raw) != ed25519.PublicKeySize {
-		return nil, errors.New("release public key is invalid")
-	}
-	client.publicKey = ed25519.PublicKey(raw)
 	return client, nil
 }
 
-func (c *Client) Enabled() bool {
-	return c != nil && len(c.publicKey) == ed25519.PublicKeySize
-}
-
-func (c *Client) FetchSigned(ctx context.Context, manifestURL, signatureURL string, maxManifestBytes int64) ([]byte, error) {
-	if !c.Enabled() {
-		return nil, errors.New("signed releases are not configured")
+func (c *Client) URL(repository, version, asset string) (string, error) {
+	if c == nil || !validRepository(repository) || !validToken(asset) {
+		return "", errors.New("release source is invalid")
 	}
-	manifest, err := c.Download(ctx, manifestURL, maxManifestBytes)
-	if err != nil {
-		return nil, fmt.Errorf("download release manifest: %w", err)
+	if version == "" {
+		return fmt.Sprintf("%s/%s/releases/latest/download/%s", c.baseURL, repository, asset), nil
 	}
-	encodedSignature, err := c.Download(ctx, signatureURL, maxSignatureBytes)
-	if err != nil {
-		return nil, fmt.Errorf("download release signature: %w", err)
+	if !validToken(version) {
+		return "", errors.New("release version is invalid")
 	}
-	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encodedSignature)))
-	if err != nil || len(signature) != ed25519.SignatureSize || !ed25519.Verify(c.publicKey, manifest, signature) {
-		return nil, errors.New("release manifest signature verification failed")
-	}
-	return manifest, nil
+	return fmt.Sprintf("%s/%s/releases/download/%s/%s", c.baseURL, repository, version, asset), nil
 }
 
 func (c *Client) Download(ctx context.Context, rawURL string, limit int64) ([]byte, error) {
@@ -111,4 +96,23 @@ func (c *Client) validateRedirectURL(u *url.URL) error {
 		return nil
 	}
 	return errors.New("release URL must use HTTPS")
+}
+
+func validRepository(value string) bool {
+	parts := strings.Split(value, "/")
+	return len(parts) == 2 && validToken(parts[0]) && validToken(parts[1])
+}
+
+func validToken(value string) bool {
+	if value == "" || value == "." || value == ".." || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') || character == '.' || character == '_' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }

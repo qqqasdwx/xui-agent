@@ -26,7 +26,7 @@ The sibling repositories are:
 - Store a distinct revocable node credential after enrollment. Design credential rotation into the protocol.
 - Authenticate and encrypt every control and event transport. Validate all messages at the boundary.
 - Never log credentials, access tokens, subscription data, source IP data, or complete user traffic records at informational level.
-- Verify signed update artifacts and provide automatic rollback after failed startup or health validation.
+- Download updates only from the fixed maintained GitHub repositories, verify manifest size and SHA-256 metadata, and provide automatic rollback after failed startup or health validation.
 - Run under a dedicated system user with the minimum filesystem access and Linux capabilities needed to manage Xray.
 
 ## Protocol and Reliability

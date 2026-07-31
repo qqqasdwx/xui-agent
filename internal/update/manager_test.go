@@ -5,10 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +17,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/qqqasdwx/xui-agent/internal/release"
 )
 
 func testArchive(t *testing.T, version string) []byte {
@@ -75,11 +74,7 @@ func setupManagedState(t *testing.T) string {
 	return state
 }
 
-func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
+func TestManagerAppliesGitHubReleaseArchiveAndConfirmsAfterHealth(t *testing.T) {
 	archive := testArchive(t, "v1.2.3")
 	digest := sha256.Sum256(archive)
 	runtimeAssetsDigest, err := RuntimeAssetsDigest(archive)
@@ -87,7 +82,9 @@ func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
 		t.Fatalf("RuntimeAssetsDigest: %v", err)
 	}
 
-	assets := map[string][]byte{"/archive": archive}
+	assets := map[string][]byte{
+		"/qqqasdwx/xui-agent/releases/download/v1.2.3/xui-agent-linux-" + runtimeArch() + ".tar.gz": archive,
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		value, ok := assets[r.URL.Path]
 		if !ok {
@@ -104,7 +101,7 @@ func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
 		PublishedAt:         "2026-07-29T00:00:00Z",
 		RuntimeAssetsSHA256: runtimeAssetsDigest,
 		Artifacts: []Artifact{{
-			OS: "linux", Arch: runtimeArch(), URL: server.URL + "/archive",
+			OS: "linux", Arch: runtimeArch(),
 			SHA256: hex.EncodeToString(digest[:]), Size: int64(len(archive)),
 		}},
 	}
@@ -112,21 +109,23 @@ func TestManagerAppliesSignedArchiveAndConfirmsAfterHealth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal manifest: %v", err)
 	}
-	assets["/manifest"] = manifestRaw
-	assets["/signature"] = []byte(base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, manifestRaw)))
+	assets["/qqqasdwx/xui-agent/releases/download/v1.2.3/manifest.json"] = manifestRaw
 
 	state := setupManagedState(t)
 	installedAssetsPath := filepath.Join(state, "runtime-assets.sha256")
 	if err := os.WriteFile(installedAssetsPath, []byte(runtimeAssetsDigest+"\n"), 0o640); err != nil {
 		t.Fatalf("write installed runtime assets: %v", err)
 	}
-	manager, err := NewManager(state, base64.StdEncoding.EncodeToString(publicKey), true, installedAssetsPath)
+	manager, err := NewManager(state, installedAssetsPath)
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	manager.releases, err = release.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatalf("release.NewClient: %v", err)
+	}
 	version, err := manager.Apply(context.Background(), Request{
 		CommandID: "command-1", Version: "v1.2.3",
-		ManifestURL: server.URL + "/manifest", SignatureURL: server.URL + "/signature",
 	})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -199,28 +198,26 @@ func TestManagerPreservesRollbackTargetWhenVersionContentChanges(t *testing.T) {
 	}
 }
 
-func TestManagerRejectsInvalidSignatureWithoutSwitching(t *testing.T) {
-	publicKey, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
+func TestManagerRejectsInvalidManifestWithoutSwitching(t *testing.T) {
 	assets := map[string][]byte{
-		"/manifest":  []byte(`{"schemaVersion":1,"version":"v1","publishedAt":"now","artifacts":[]}`),
-		"/signature": []byte(base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))),
+		"/qqqasdwx/xui-agent/releases/download/v1/manifest.json": []byte(`{"schemaVersion":1,"version":"v1","publishedAt":"now","artifacts":[]}`),
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(assets[r.URL.Path]) }))
 	defer server.Close()
 	state := setupManagedState(t)
-	manager, err := NewManager(state, base64.StdEncoding.EncodeToString(publicKey), true, filepath.Join(state, "runtime-assets.sha256"))
+	manager, err := NewManager(state, filepath.Join(state, "runtime-assets.sha256"))
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	manager.releases, err = release.NewClient(server.URL, true)
+	if err != nil {
+		t.Fatalf("release.NewClient: %v", err)
+	}
 	_, err = manager.Apply(context.Background(), Request{
 		CommandID: "command-bad", Version: "v1",
-		ManifestURL: server.URL + "/manifest", SignatureURL: server.URL + "/signature",
 	})
 	if err == nil {
-		t.Fatal("invalid manifest signature was accepted")
+		t.Fatal("invalid release manifest was accepted")
 	}
 	current, readErr := os.Readlink(filepath.Join(state, "current"))
 	if readErr != nil || current != "versions/bootstrap/xui-agent" {

@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	ManifestSchemaVersion = 1
+	ManifestSchemaVersion = 2
 	maxManifestBytes      = 1 << 20
 	maxArchiveBytes       = 128 << 20
 	maxExpandedBytes      = 128 << 20
@@ -27,9 +27,21 @@ var requiredBundleFiles = []string{"xray", "geoip.dat", "geosite.dat"}
 type Artifact struct {
 	OS     string `json:"os"`
 	Arch   string `json:"arch"`
-	URL    string `json:"url"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
+}
+
+func releaseAssetName(arch string) string {
+	switch arch {
+	case "amd64":
+		return "Xray-linux-64.zip"
+	case "arm64":
+		return "Xray-linux-arm64-v8a.zip"
+	case "armv7":
+		return "Xray-linux-arm32-v7a.zip"
+	default:
+		return ""
+	}
 }
 
 type Manifest struct {

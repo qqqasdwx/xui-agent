@@ -151,15 +151,11 @@ func DecodeCommandPayload[T any](command Command) (T, error) {
 }
 
 type AgentUpdateCommand struct {
-	Version      string `json:"version"`
-	ManifestURL  string `json:"manifestUrl"`
-	SignatureURL string `json:"signatureUrl"`
+	Version string `json:"version"`
 }
 
 type XrayUpdateCommand struct {
-	Version      string `json:"version"`
-	ManifestURL  string `json:"manifestUrl"`
-	SignatureURL string `json:"signatureUrl"`
+	Version string `json:"version"`
 }
 
 type ValidateConfigCommand struct {

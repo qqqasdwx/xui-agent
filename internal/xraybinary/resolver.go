@@ -17,7 +17,7 @@ func ManagedPath(stateDirectory string) string {
 }
 
 // ActivePath keeps an existing managed Xray executable as the bootstrap
-// fallback until the first signed runtime bundle is selected. Once an applied
+// fallback until the first managed runtime bundle is selected. Once an applied
 // marker exists, a missing current link is corruption and must fail visibly.
 func ActivePath(stateDirectory, bootstrapPath string) string {
 	directory := filepath.Join(stateDirectory, runtimeDirectory)

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/qqqasdwx/xui-agent/internal/signedrelease"
+	"github.com/qqqasdwx/xui-agent/internal/release"
 )
 
 const (
@@ -30,7 +30,10 @@ const (
 	retainedVersions      = 3
 	pendingFilename       = "update-pending.json"
 	failedFilename        = "update-failed.json"
-	ManifestSchemaVersion = 2
+	ManifestSchemaVersion = 3
+	releaseBaseURL        = "https://github.com"
+	releaseRepository     = "qqqasdwx/xui-agent"
+	manifestAssetName     = "manifest.json"
 )
 
 var runtimeAssetNames = []string{
@@ -46,7 +49,6 @@ var ErrRestartRequired = errors.New("agent restart required to activate the upda
 type Artifact struct {
 	OS     string `json:"os"`
 	Arch   string `json:"arch"`
-	URL    string `json:"url"`
 	SHA256 string `json:"sha256"`
 	Size   int64  `json:"size"`
 }
@@ -60,10 +62,8 @@ type Manifest struct {
 }
 
 type Request struct {
-	CommandID    string
-	Version      string
-	ManifestURL  string
-	SignatureURL string
+	CommandID string
+	Version   string
 }
 
 type Pending struct {
@@ -77,11 +77,11 @@ type Pending struct {
 type Manager struct {
 	stateDirectory      string
 	installedAssetsPath string
-	releases            *signedrelease.Client
+	releases            *release.Client
 }
 
-func NewManager(stateDirectory, publicKey string, allowInsecure bool, installedAssetsPath string) (*Manager, error) {
-	releases, err := signedrelease.NewClient(publicKey, allowInsecure)
+func NewManager(stateDirectory, installedAssetsPath string) (*Manager, error) {
+	releases, err := release.NewClient(releaseBaseURL, false)
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +93,7 @@ func NewManager(stateDirectory, publicKey string, allowInsecure bool, installedA
 }
 
 func (m *Manager) Enabled() bool {
-	return m != nil && m.releases.Enabled()
+	return m != nil && m.releases != nil
 }
 
 func (m *Manager) Pending() (*Pending, error) {
@@ -138,7 +138,7 @@ func (m *Manager) Confirm(version string) error {
 
 func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 	if !m.Enabled() {
-		return "", errors.New("signed updates are not configured")
+		return "", errors.New("release updates are not configured")
 	}
 	if request.CommandID == "" {
 		return "", errors.New("update command id is required")
@@ -148,9 +148,13 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 			return "", err
 		}
 	}
-	manifestRaw, err := m.releases.FetchSigned(ctx, request.ManifestURL, request.SignatureURL, maxManifestBytes)
+	manifestURL, err := m.releases.URL(releaseRepository, request.Version, manifestAssetName)
 	if err != nil {
-		return "", fmt.Errorf("verify update manifest: %w", err)
+		return "", err
+	}
+	manifestRaw, err := m.releases.Download(ctx, manifestURL, maxManifestBytes)
+	if err != nil {
+		return "", fmt.Errorf("download update manifest: %w", err)
 	}
 	manifest, err := decodeManifest(manifestRaw)
 	if err != nil {
@@ -167,7 +171,12 @@ func (m *Manager) Apply(ctx context.Context, request Request) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	archive, err := m.releases.Download(ctx, artifact.URL, maxArchiveBytes)
+	archiveName := "xui-agent-linux-" + artifact.Arch + ".tar.gz"
+	archiveURL, err := m.releases.URL(releaseRepository, manifest.Version, archiveName)
+	if err != nil {
+		return "", err
+	}
+	archive, err := m.releases.Download(ctx, archiveURL, maxArchiveBytes)
 	if err != nil {
 		return "", fmt.Errorf("download update archive: %w", err)
 	}

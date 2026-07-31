@@ -1,11 +1,10 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY=${XUI_AGENT_REPOSITORY:-qqqasdwx/xui-agent}
+REPOSITORY=qqqasdwx/xui-agent
 VERSION=${XUI_AGENT_VERSION:-latest}
 SERVER_URL=${XUI_AGENT_SERVER_URL:-}
 SERVER_CERT_SHA256=${XUI_AGENT_SERVER_CERT_SHA256:-}
-UPDATE_PUBLIC_KEY=${XUI_AGENT_UPDATE_PUBLIC_KEY:-}
 ALLOW_INSECURE=false
 XRAY_BINARY=${XUI_AGENT_XRAY_BINARY:-}
 XRAY_MODE=${XUI_AGENT_XRAY_MODE:-observe}
@@ -48,7 +47,6 @@ Usage: install.sh --server-url URL [options]
 Options:
   --version VERSION              GitHub release tag (default: latest)
   --server-cert-sha256 DIGEST    Pin the center certificate SHA-256
-  --update-public-key KEY        Base64 Ed25519 release verification key
   --allow-insecure               Allow plain HTTP; intended only for tests
   --xray-binary PATH             Existing Xray executable to observe
   --xray-mode MODE               Xray mode: observe or managed
@@ -67,7 +65,6 @@ while [ "$#" -gt 0 ]; do
         --version) VERSION=${2:?missing value for --version}; shift 2 ;;
         --server-url) SERVER_URL=${2:?missing value for --server-url}; shift 2 ;;
         --server-cert-sha256) SERVER_CERT_SHA256=${2:?missing value for --server-cert-sha256}; shift 2 ;;
-        --update-public-key) UPDATE_PUBLIC_KEY=${2:?missing value for --update-public-key}; shift 2 ;;
         --allow-insecure) ALLOW_INSECURE=true; shift ;;
         --xray-binary) XRAY_BINARY=${2:?missing value for --xray-binary}; shift 2 ;;
         --xray-mode) XRAY_MODE=${2:?missing value for --xray-mode}; shift 2 ;;
@@ -251,7 +248,6 @@ if [ ! -f "$CONFIG_PATH" ]; then
         --server-url "$SERVER_URL" \
         --state-directory "$STATE_DIRECTORY" \
         --server-cert-sha256 "$SERVER_CERT_SHA256" \
-        --update-public-key "$UPDATE_PUBLIC_KEY" \
         --xray-mode "$XRAY_MODE" \
         --xray-binary "$XRAY_BINARY" \
         --xray-config "$XRAY_CONFIG" \
