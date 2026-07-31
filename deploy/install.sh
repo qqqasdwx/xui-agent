@@ -46,7 +46,7 @@ run_as_agent() {
     if [ "$INIT_SYSTEM" = systemd ]; then
         runuser -u xui-agent -- "$@"
     else
-        su -s /bin/sh xui-agent -c 'exec "$@"' sh "$@"
+        su -s /bin/sh -- xui-agent -c 'exec "$@"' sh "$@"
     fi
 }
 
