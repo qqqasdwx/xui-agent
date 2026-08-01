@@ -6,12 +6,15 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -415,6 +418,55 @@ func TestRunSessionRejectsMismatchedHeartbeatAcknowledgement(t *testing.T) {
 	stable, err := client.runSession(context.Background(), identity.Identity{NodeID: 1, Credential: "credential"})
 	if stable || err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("runSession stable=%v err=%v, want mismatched acknowledgement error", stable, err)
+	}
+}
+
+func TestControlFailureReasonDoesNotExposeNetworkAddressesOrServerText(t *testing.T) {
+	privateDetails := []string{"192.0.2.10", "198.51.100.20", "private-server-message"}
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "network operation",
+			err: fmt.Errorf("write heartbeat: %w", &net.OpError{
+				Op:     "write",
+				Net:    "tcp",
+				Source: &net.TCPAddr{IP: net.ParseIP("192.0.2.10"), Port: 12345},
+				Addr:   &net.TCPAddr{IP: net.ParseIP("198.51.100.20"), Port: 443},
+				Err:    syscall.EPIPE,
+			}),
+			want: "control transport I/O failure",
+		},
+		{
+			name: "handshake status",
+			err:  errors.New("connect websocket: HTTP 401"),
+			want: "websocket handshake failed (HTTP 401)",
+		},
+		{
+			name: "server close",
+			err:  &websocket.CloseError{Code: websocket.ClosePolicyViolation, Text: "private-server-message"},
+			want: "websocket closed (code 1008)",
+		},
+		{
+			name: "protocol detail",
+			err:  errors.New("server rejected heartbeat: invalid: private-server-message"),
+			want: "control protocol failure",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := controlFailureReason(test.err)
+			if got != test.want {
+				t.Fatalf("controlFailureReason() = %q, want %q", got, test.want)
+			}
+			for _, detail := range privateDetails {
+				if strings.Contains(got, detail) {
+					t.Fatalf("controlFailureReason() exposed %q in %q", detail, got)
+				}
+			}
+		})
 	}
 }
 

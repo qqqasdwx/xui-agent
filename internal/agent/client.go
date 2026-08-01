@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -187,9 +188,9 @@ func (c *Client) Run(ctx context.Context) error {
 			return err
 		}
 		if pending, pendingErr := c.updater.Pending(); pendingErr == nil && pending.TargetVersion != c.version {
-			return fmt.Errorf("updated agent activation was not acknowledged: %w", err)
+			return fmt.Errorf("updated agent activation was not acknowledged: %s", controlFailureReason(err))
 		}
-		slog.Warn("control session ended", "error", err, "retry_in", backoff)
+		slog.Warn("control session ended", "reason", controlFailureReason(err), "retry_in", backoff)
 		jitter := time.Duration(rand.Int64N(int64(backoff/2) + 1))
 		timer := time.NewTimer(backoff + jitter)
 		select {
@@ -261,7 +262,7 @@ func (c *Client) enroll(ctx context.Context, token string) (identity.Identity, e
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return identity.Identity{}, fmt.Errorf("enroll request: %w", err)
+		return identity.Identity{}, fmt.Errorf("enroll request: %s", controlFailureReason(err))
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
@@ -642,6 +643,34 @@ func safeUpdateError(err error) string {
 		message = message[:512]
 	}
 	return message
+}
+
+func controlFailureReason(err error) string {
+	if err == nil {
+		return "unknown control transport failure"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "control request canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "control transport timeout"
+	}
+	var closeError *websocket.CloseError
+	if errors.As(err, &closeError) {
+		return fmt.Sprintf("websocket closed (code %d)", closeError.Code)
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		if networkError.Timeout() {
+			return "control transport timeout"
+		}
+		return "control transport I/O failure"
+	}
+	var status int
+	if _, scanErr := fmt.Sscanf(err.Error(), "connect websocket: HTTP %d", &status); scanErr == nil && status >= 100 && status <= 599 {
+		return fmt.Sprintf("websocket handshake failed (HTTP %d)", status)
+	}
+	return "control protocol failure"
 }
 
 func (c *Client) endpointURL(endpoint string) string {
