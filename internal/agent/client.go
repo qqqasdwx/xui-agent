@@ -20,12 +20,14 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/qqqasdwx/xui-agent/internal/config"
 	"github.com/qqqasdwx/xui-agent/internal/identity"
 	"github.com/qqqasdwx/xui-agent/internal/status"
+	"github.com/qqqasdwx/xui-agent/internal/telemetry"
 	updatepkg "github.com/qqqasdwx/xui-agent/internal/update"
 	"github.com/qqqasdwx/xui-agent/internal/xrayconfig"
 	"github.com/qqqasdwx/xui-agent/internal/xrayruntime"
@@ -49,6 +51,7 @@ type Client struct {
 	configValidator       *xrayconfig.Manager
 	configApplier         *xrayruntime.Manager
 	xrayUpdater           *xrayupdate.Manager
+	eventRuntime          *telemetry.Runtime
 	httpClient            *http.Client
 	wsDialer              *websocket.Dialer
 	startedAt             time.Time
@@ -169,10 +172,44 @@ func (c *Client) Run(ctx context.Context) error {
 		slog.Info("agent enrolled", "node_id", id.NodeID, "node_name", id.NodeName)
 	}
 
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+	eventDone := make(chan error, 1)
+	var eventWG sync.WaitGroup
+	if c.cfg.TelemetryEnabled() {
+		runtime, err := telemetry.NewRuntime(
+			c.cfg, id, c.httpClient, c.endpointURL("agent/v1/events"), c.collector.Xray, c.startedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("initialize event telemetry: %w", err)
+		}
+		c.eventRuntime = runtime
+		eventWG.Add(1)
+		go func() {
+			defer eventWG.Done()
+			eventDone <- runtime.Run(runCtx)
+		}()
+		defer func() {
+			cancelRun()
+			eventWG.Wait()
+			_ = runtime.Close()
+		}()
+	}
+
 	backoff := time.Second
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil
+		}
+		if c.eventRuntime != nil {
+			select {
+			case eventErr := <-eventDone:
+				if eventErr == nil {
+					return errors.New("event telemetry stopped unexpectedly")
+				}
+				return fmt.Errorf("event telemetry stopped: %w", eventErr)
+			default:
+			}
 		}
 		if c.validatePendingUpdate && time.Since(c.startedAt) >= updateHealthTimeout {
 			return errors.New("updated agent did not establish a healthy control session before the deadline")
@@ -388,6 +425,9 @@ func (c *Client) writeHeartbeat(ctx context.Context, conn *websocket.Conn) (stri
 	now := time.Now()
 	messageID := fmt.Sprintf("%d-%d", now.UnixMilli(), rand.Uint64())
 	heartbeat := c.collector.Heartbeat(ctx, c.version, now)
+	if c.eventRuntime != nil {
+		heartbeat.Events = c.eventRuntime.Info()
+	}
 	heartbeat.Capabilities = c.capabilities()
 	envelope, err := v1.NewEnvelope(v1.MessageHeartbeat, messageID, heartbeat, now)
 	if err != nil {
@@ -415,6 +455,9 @@ func (c *Client) capabilities() []string {
 	}
 	if c.xrayUpdater != nil && c.xrayUpdater.Enabled() {
 		capabilities = append(capabilities, v1.CapabilityXrayUpdate)
+	}
+	if c.eventRuntime != nil {
+		capabilities = append(capabilities, v1.CapabilityEventUpload)
 	}
 	return capabilities
 }

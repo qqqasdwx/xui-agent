@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/qqqasdwx/xui-agent/internal/xraybinary"
 )
@@ -17,15 +19,20 @@ const (
 	XrayModeObserve          = "observe"
 	XrayModeManaged          = "managed"
 	DefaultRuntimeAssetsPath = "/etc/xui-agent/runtime-assets.sha256"
+	DefaultEventSpoolName    = "events.db"
+	DefaultAccessLogName     = "logs/access.log"
+	DefaultRouteListen       = "127.0.0.1:8687"
+	DefaultXrayAPIAddress    = "127.0.0.1:62789"
 )
 
 type Config struct {
-	ServerURL        string       `json:"serverUrl"`
-	StateDirectory   string       `json:"stateDirectory"`
-	AllowInsecure    bool         `json:"allowInsecure"`
-	ServerCertSHA256 string       `json:"serverCertSha256,omitempty"`
-	Xray             XrayConfig   `json:"xray"`
-	Update           UpdateConfig `json:"update"`
+	ServerURL        string          `json:"serverUrl"`
+	StateDirectory   string          `json:"stateDirectory"`
+	AllowInsecure    bool            `json:"allowInsecure"`
+	ServerCertSHA256 string          `json:"serverCertSha256,omitempty"`
+	Xray             XrayConfig      `json:"xray"`
+	Update           UpdateConfig    `json:"update"`
+	Telemetry        TelemetryConfig `json:"telemetry,omitempty"`
 }
 
 type XrayConfig struct {
@@ -48,6 +55,27 @@ type UpdateConfig struct {
 	// the release installer. Release downloads no longer use this value.
 	PublicKey         string `json:"publicKey,omitempty"`
 	RuntimeAssetsPath string `json:"runtimeAssetsPath,omitempty"`
+}
+
+type TelemetryConfig struct {
+	Enabled                  *bool  `json:"enabled,omitempty"`
+	AccessPath               string `json:"accessPath,omitempty"`
+	SpoolPath                string `json:"spoolPath,omitempty"`
+	RouteListen              string `json:"routeListen,omitempty"`
+	XrayAPIAddress           string `json:"xrayApiAddress,omitempty"`
+	LogTimezone              string `json:"logTimezone,omitempty"`
+	PollIntervalSeconds      int    `json:"pollIntervalSeconds,omitempty"`
+	SampleIntervalSeconds    int    `json:"sampleIntervalSeconds,omitempty"`
+	HeartbeatIntervalSeconds int    `json:"heartbeatIntervalSeconds,omitempty"`
+	QueueMaxBytes            uint64 `json:"queueMaxBytes,omitempty"`
+	QueueMaxEvents           uint64 `json:"queueMaxEvents,omitempty"`
+}
+
+func (c Config) TelemetryEnabled() bool {
+	if c.Telemetry.Enabled != nil {
+		return *c.Telemetry.Enabled
+	}
+	return c.Xray.Managed()
 }
 
 func Load(path string) (Config, error) {
@@ -77,6 +105,7 @@ func Load(path string) (Config, error) {
 	if cfg.Update.RuntimeAssetsPath == "" {
 		cfg.Update.RuntimeAssetsPath = DefaultRuntimeAssetsPath
 	}
+	cfg.Telemetry = normalizeTelemetry(cfg.StateDirectory, cfg.Telemetry)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
@@ -179,6 +208,82 @@ func (c Config) Validate() error {
 	}
 	if c.Update.RuntimeAssetsPath != "" && !filepath.IsAbs(c.Update.RuntimeAssetsPath) {
 		return errors.New("update.runtimeAssetsPath must be an absolute path")
+	}
+	telemetry := normalizeTelemetry(c.StateDirectory, c.Telemetry)
+	if c.TelemetryEnabled() {
+		if !filepath.IsAbs(telemetry.AccessPath) || !filepath.IsAbs(telemetry.SpoolPath) {
+			return errors.New("telemetry accessPath and spoolPath must be absolute paths")
+		}
+		if _, err := time.LoadLocation(telemetry.LogTimezone); err != nil {
+			return errors.New("telemetry.logTimezone must be a valid IANA timezone or Local")
+		}
+		if err := validateLoopbackAddress("telemetry.routeListen", telemetry.RouteListen); err != nil {
+			return err
+		}
+		if err := validateLoopbackAddress("telemetry.xrayApiAddress", telemetry.XrayAPIAddress); err != nil {
+			return err
+		}
+		if telemetry.PollIntervalSeconds < 1 || telemetry.PollIntervalSeconds > 60 {
+			return errors.New("telemetry.pollIntervalSeconds must be between 1 and 60")
+		}
+		if telemetry.SampleIntervalSeconds < 30 || telemetry.SampleIntervalSeconds > 3600 {
+			return errors.New("telemetry.sampleIntervalSeconds must be between 30 and 3600")
+		}
+		if telemetry.HeartbeatIntervalSeconds < 30 || telemetry.HeartbeatIntervalSeconds > 3600 {
+			return errors.New("telemetry.heartbeatIntervalSeconds must be between 30 and 3600")
+		}
+		if telemetry.QueueMaxBytes < 1<<20 || telemetry.QueueMaxBytes > 4<<30 {
+			return errors.New("telemetry.queueMaxBytes must be between 1 MiB and 4 GiB")
+		}
+		if telemetry.QueueMaxEvents < 100 || telemetry.QueueMaxEvents > 10_000_000 {
+			return errors.New("telemetry.queueMaxEvents must be between 100 and 10000000")
+		}
+	}
+	return nil
+}
+
+func normalizeTelemetry(stateDirectory string, cfg TelemetryConfig) TelemetryConfig {
+	if cfg.AccessPath == "" {
+		cfg.AccessPath = filepath.Join(stateDirectory, filepath.FromSlash(DefaultAccessLogName))
+	}
+	if cfg.SpoolPath == "" {
+		cfg.SpoolPath = filepath.Join(stateDirectory, DefaultEventSpoolName)
+	}
+	if cfg.RouteListen == "" {
+		cfg.RouteListen = DefaultRouteListen
+	}
+	if cfg.XrayAPIAddress == "" {
+		cfg.XrayAPIAddress = DefaultXrayAPIAddress
+	}
+	if cfg.LogTimezone == "" {
+		cfg.LogTimezone = "Local"
+	}
+	if cfg.PollIntervalSeconds == 0 {
+		cfg.PollIntervalSeconds = 1
+	}
+	if cfg.SampleIntervalSeconds == 0 {
+		cfg.SampleIntervalSeconds = 300
+	}
+	if cfg.HeartbeatIntervalSeconds == 0 {
+		cfg.HeartbeatIntervalSeconds = 300
+	}
+	if cfg.QueueMaxBytes == 0 {
+		cfg.QueueMaxBytes = 256 << 20
+	}
+	if cfg.QueueMaxEvents == 0 {
+		cfg.QueueMaxEvents = 100000
+	}
+	return cfg
+}
+
+func validateLoopbackAddress(name string, value string) error {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil || port == "" {
+		return fmt.Errorf("%s must be a loopback host and port", name)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("%s must bind to a loopback IP", name)
 	}
 	return nil
 }

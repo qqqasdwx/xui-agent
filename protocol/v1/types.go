@@ -13,6 +13,7 @@ const (
 	CapabilityConfigValidate = "config_validate"
 	CapabilityConfigApply    = "config_apply"
 	CapabilityXrayUpdate     = "xray_update"
+	CapabilityEventUpload    = "event_upload"
 	MessageHelloAck          = "hello_ack"
 	MessageHeartbeat         = "heartbeat"
 	MessageHeartbeatAck      = "heartbeat_ack"
@@ -85,16 +86,17 @@ type HelloAck struct {
 }
 
 type Heartbeat struct {
-	ProtocolVersion string     `json:"protocolVersion"`
-	AgentVersion    string     `json:"agentVersion"`
-	Hostname        string     `json:"hostname"`
-	OS              string     `json:"os"`
-	Arch            string     `json:"arch"`
-	AgentStartedAt  int64      `json:"agentStartedAt"`
-	ClockUnixMilli  int64      `json:"clockUnixMilli"`
-	System          SystemInfo `json:"system"`
-	Xray            XrayInfo   `json:"xray"`
-	Capabilities    []string   `json:"capabilities"`
+	ProtocolVersion string         `json:"protocolVersion"`
+	AgentVersion    string         `json:"agentVersion"`
+	Hostname        string         `json:"hostname"`
+	OS              string         `json:"os"`
+	Arch            string         `json:"arch"`
+	AgentStartedAt  int64          `json:"agentStartedAt"`
+	ClockUnixMilli  int64          `json:"clockUnixMilli"`
+	System          SystemInfo     `json:"system"`
+	Xray            XrayInfo       `json:"xray"`
+	Events          EventQueueInfo `json:"events"`
+	Capabilities    []string       `json:"capabilities"`
 }
 
 type SystemInfo struct {

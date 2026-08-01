@@ -11,5 +11,18 @@
     "binaryPath": "/usr/local/x-ui/bin/xray-linux-amd64",
     "configPath": "/usr/local/x-ui/bin/config.json",
     "pidFile": ""
+  },
+  "telemetry": {
+    "enabled": false,
+    "accessPath": "/var/lib/xui-agent/logs/access.log",
+    "spoolPath": "/var/lib/xui-agent/events.db",
+    "routeListen": "127.0.0.1:8687",
+    "xrayApiAddress": "127.0.0.1:62789",
+    "logTimezone": "Local",
+    "pollIntervalSeconds": 1,
+    "sampleIntervalSeconds": 300,
+    "heartbeatIntervalSeconds": 300,
+    "queueMaxBytes": 268435456,
+    "queueMaxEvents": 100000
   }
 }

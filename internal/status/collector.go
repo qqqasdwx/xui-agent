@@ -54,6 +54,10 @@ func (c *Collector) Heartbeat(ctx context.Context, agentVersion string, now time
 	}
 }
 
+func (c *Collector) Xray(ctx context.Context) v1.XrayInfo {
+	return c.collectXray(ctx)
+}
+
 func collectSystemInfo(diskPath string) v1.SystemInfo {
 	var out v1.SystemInfo
 	if f, err := os.Open("/proc/uptime"); err == nil {

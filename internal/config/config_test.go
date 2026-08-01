@@ -69,6 +69,36 @@ func TestLoadAcceptsRetiredReleasePublicKey(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesManagedTelemetryWithLoopbackDefaults(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	raw := []byte(`{"serverUrl":"https://panel.example.com","stateDirectory":"/var/lib/xui-agent","xray":{"mode":"managed","binaryPath":"/var/lib/xui-agent/xray-runtime/current/xray"},"update":{}}`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.TelemetryEnabled() {
+		t.Fatal("managed telemetry is not enabled by default")
+	}
+	if loaded.Telemetry.AccessPath != "/var/lib/xui-agent/logs/access.log" || loaded.Telemetry.RouteListen != DefaultRouteListen {
+		t.Fatalf("telemetry defaults = %+v", loaded.Telemetry)
+	}
+}
+
+func TestValidateRejectsNonLoopbackTelemetryAPI(t *testing.T) {
+	enabled := true
+	cfg := Config{
+		ServerURL: "https://panel.example.com", StateDirectory: "/var/lib/xui-agent",
+		Xray:      XrayConfig{Mode: XrayModeManaged, BinaryPath: "/var/lib/xui-agent/xray-runtime/current/xray"},
+		Telemetry: TelemetryConfig{Enabled: &enabled, XrayAPIAddress: "0.0.0.0:62789"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("non-loopback telemetry API address was accepted")
+	}
+}
+
 func TestWriteIsAtomicAndDoesNotOverwriteByDefault(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config", "config.json")
 	cfg := Config{ServerURL: "https://panel.example.com/base", StateDirectory: "/var/lib/xui-agent"}
