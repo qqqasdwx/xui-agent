@@ -26,6 +26,14 @@ func TestParseAccessLineNormalizesAndDropsInternalAPI(t *testing.T) {
 	if err != nil || keep {
 		t.Fatalf("internal API keep=%v err=%v", keep, err)
 	}
+	_, keep, err = parseAccessLine("2026/08/01 10:20:30 from 127.0.0.1:1234 accepted tcp:127.0.0.1:62789 [api -> api]", time.UTC)
+	if err != nil || keep {
+		t.Fatalf("internal API without email keep=%v err=%v", keep, err)
+	}
+	_, keep, err = parseAccessLine("2026/08/01 10:20:30 from 192.0.2.10:43123 accepted tcp:example.com:443 [in-443 -> direct]", time.UTC)
+	if err == nil || keep {
+		t.Fatalf("business access without email keep=%v err=%v", keep, err)
+	}
 }
 
 func TestAccessCollectorStartsAtEndAndKeepsPartialLine(t *testing.T) {

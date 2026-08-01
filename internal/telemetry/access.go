@@ -30,7 +30,7 @@ const (
 	maxAccessLineBytes  = 64 << 10
 )
 
-var accessPattern = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+from\s+(\S+)\s+accepted\s+(tcp|udp):(.+)\s+\[(.+?)\s+(?:->|>>)\s+(.+?)\]\s+email:\s+(\S+)\s*$`)
+var accessPattern = regexp.MustCompile(`^(\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)\s+from\s+(\S+)\s+accepted\s+(tcp|udp):(.+)\s+\[(.+?)\s+(?:->|>>)\s+(.+?)\](?:\s+email:\s+(\S+))?\s*$`)
 
 type AccessCollector struct {
 	path     string
@@ -331,10 +331,6 @@ func parseAccessLine(line string, location *time.Location) (parsedAccess, bool, 
 	if err != nil {
 		return parsedAccess{}, false, err
 	}
-	email, err := cleanToken(matches[7], 254, false)
-	if err != nil {
-		return parsedAccess{}, false, err
-	}
 	inbound, err := cleanToken(matches[5], 128, false)
 	if err != nil {
 		return parsedAccess{}, false, err
@@ -345,6 +341,10 @@ func parseAccessLine(line string, location *time.Location) (parsedAccess, bool, 
 	}
 	if inbound == "api" && outbound == "api" {
 		return parsedAccess{}, false, nil
+	}
+	email, err := cleanToken(matches[7], 254, false)
+	if err != nil {
+		return parsedAccess{}, false, err
 	}
 	return parsedAccess{observedAt: observedAt, payload: v1.AccessEvent{
 		Email: email, SourceIP: sourceIP, SourcePort: sourcePort, Network: matches[3],
